@@ -1,5 +1,20 @@
 import Cocoa
 
+enum FloatingThumbnailCorner: String {
+    case bottomRight
+    case bottomLeft
+    case topRight
+    case topLeft
+
+    var isLeft: Bool {
+        self == .bottomLeft || self == .topLeft
+    }
+
+    var isTop: Bool {
+        self == .topLeft || self == .topRight
+    }
+}
+
 @MainActor
 class FloatingThumbnailController: NSObject, NSDraggingSource {
 
@@ -7,6 +22,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
     private var dismissTask: DispatchWorkItem?
     private(set) var image: NSImage
     private var thumbnailView: ThumbnailView?
+    private var corner: FloatingThumbnailCorner = .bottomRight
     /// History entry ID — used to match and update the thumbnail when the editor saves.
     var historyEntryID: String?
     /// The intended final frame — used instead of window.frame to avoid reading
@@ -29,9 +45,15 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         super.init()
     }
 
+    static func currentThumbnailSize() -> NSSize {
+        let scale = CGFloat(UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0)
+        return NSSize(width: round(240 * scale), height: round(160 * scale))
+    }
+
     // MARK: - Show
 
-    func show(atY y: CGFloat) {
+    func show(at origin: NSPoint, corner: FloatingThumbnailCorner) {
+        self.corner = corner
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let screenFrame = screen.visibleFrame
 
@@ -41,15 +63,15 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         guard image.size.width > 0 && image.size.height > 0 else { return }
 
         // Fixed thumbnail size scaled by user preference (default 1.0 = 240x160)
-        let scale = CGFloat(UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0)
-        let thumbSize = NSSize(width: round(240 * scale), height: round(160 * scale))
+        let thumbSize = Self.currentThumbnailSize()
 
-        // Clamp Y so the thumbnail always fits within the visible screen
-        let clampedY = min(y, screenFrame.maxY - thumbSize.height - padding)
+        // Clamp so the thumbnail always fits within the visible screen.
+        let clampedX = min(origin.x, screenFrame.maxX - thumbSize.width - padding)
+        let finalX = max(screenFrame.minX + padding, clampedX)
+        let clampedY = min(origin.y, screenFrame.maxY - thumbSize.height - padding)
         let finalY   = max(screenFrame.minY + padding, clampedY)
 
-        let finalX = screenFrame.maxX - thumbSize.width - padding
-        let startX = screenFrame.maxX + 10
+        let startX = corner.isLeft ? screenFrame.minX - thumbSize.width - 10 : screenFrame.maxX + 10
 
         let panel = NSPanel(
             contentRect: NSRect(x: startX, y: finalY, width: thumbSize.width, height: thumbSize.height),
@@ -145,10 +167,10 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
     }
 
     /// Animate this thumbnail to a new Y position (used when a lower thumbnail is dismissed).
-    func moveTo(y: CGFloat) {
+    func moveTo(origin: NSPoint) {
         guard let window = window else { return }
-        guard targetFrame.minY != y else { return }
-        let newFrame = NSRect(x: targetFrame.minX, y: y, width: targetFrame.width, height: targetFrame.height)
+        guard targetFrame.origin != origin else { return }
+        let newFrame = NSRect(x: origin.x, y: origin.y, width: targetFrame.width, height: targetFrame.height)
         targetFrame = newFrame
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.25
@@ -161,7 +183,7 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
         guard let window = window else { return }
         let frame = window.frame
         let screen = NSScreen.main ?? NSScreen.screens[0]
-        let offscreenX = screen.visibleFrame.maxX + 10
+        let offscreenX = corner.isLeft ? screen.visibleFrame.minX - frame.width - 10 : screen.visibleFrame.maxX + 10
 
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.4

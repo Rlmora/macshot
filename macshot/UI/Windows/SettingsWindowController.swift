@@ -53,6 +53,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var thumbnailAutoDismissStepper: NSStepper!
     private var thumbnailAutoDismissField: NSTextField!
     private var thumbnailStackingPopup: NSPopUpButton!
+    private var thumbnailCornerPopup: NSPopUpButton!
     private var historyUnlimitedCheckbox: NSButton!
     private var thumbnailScaleLabel: NSTextField!
     private var launchAtLoginCheckbox: NSButton!
@@ -573,6 +574,13 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         thumbnailStackingPopup.action = #selector(thumbnailStackingChanged(_:))
 
         stack.addArrangedSubview(indented(labeledRow(L("  Multiple previews:"), controls: [thumbnailStackingPopup!])))
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        thumbnailCornerPopup = NSPopUpButton()
+        thumbnailCornerPopup.addItems(withTitles: [L("Bottom Right"), L("Bottom Left"), L("Top Right"), L("Top Left")])
+        thumbnailCornerPopup.target = self
+        thumbnailCornerPopup.action = #selector(thumbnailCornerChanged(_:))
+        stack.addArrangedSubview(indented(labeledRow(L("  Position:"), controls: [thumbnailCornerPopup!])))
         stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
 
         let sizeSlider = NSSlider(value: UserDefaults.standard.object(forKey: "thumbnailScale") as? Double ?? 1.0,
@@ -2093,6 +2101,14 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         let stacking = UserDefaults.standard.object(forKey: "thumbnailStacking") as? Bool ?? true
         thumbnailStackingPopup.selectItem(at: stacking ? 0 : 1)
 
+        let thumbnailCorner = UserDefaults.standard.string(forKey: "thumbnailCorner") ?? "bottomRight"
+        switch thumbnailCorner {
+        case "bottomLeft": thumbnailCornerPopup.selectItem(at: 1)
+        case "topRight": thumbnailCornerPopup.selectItem(at: 2)
+        case "topLeft": thumbnailCornerPopup.selectItem(at: 3)
+        default: thumbnailCornerPopup.selectItem(at: 0)
+        }
+
         let launchAtLogin = UserDefaults.standard.bool(forKey: "launchAtLogin")
         launchAtLoginCheckbox.state = launchAtLogin ? .on : .off
 
@@ -2250,6 +2266,10 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
 
     @objc private func thumbnailStackingChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem == 0, forKey: "thumbnailStacking")
+    }
+    @objc private func thumbnailCornerChanged(_ sender: NSPopUpButton) {
+        let values = ["bottomRight", "bottomLeft", "topRight", "topLeft"]
+        UserDefaults.standard.set(values[sender.indexOfSelectedItem], forKey: "thumbnailCorner")
     }
     @objc private func quickModeChanged(_ sender: NSPopUpButton) {
         UserDefaults.standard.set(sender.indexOfSelectedItem, forKey: "quickCaptureMode")

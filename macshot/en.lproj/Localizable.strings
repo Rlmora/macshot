@@ -215,6 +215,7 @@
 "  Dismiss after:" = "  Dismiss after:";
 "seconds before auto-dismiss (0 = never)" = "seconds before auto-dismiss (0 = never)";
 "  Multiple previews:" = "  Multiple previews:";
+"  Position:" = "  Position:";
 "Stack (keep all)" = "Stack (keep all)";
 "Replace (show only latest)" = "Replace (show only latest)";
 "Menu Bar Order" = "Menu Bar Order";

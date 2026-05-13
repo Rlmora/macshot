@@ -1435,12 +1435,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let screenFrame = screen.visibleFrame
         let padding: CGFloat = 16
         let gap: CGFloat = 8
+        let corner = thumbnailCorner()
+        let thumbSize = FloatingThumbnailController.currentThumbnailSize()
+        let xOrigin = thumbnailX(for: thumbSize.width, in: screenFrame, corner: corner, padding: padding)
 
-        // Compute Y: stack above any existing thumbnails
-        var yOrigin = screenFrame.minY + padding
+        // Compute Y: bottom corners stack upward, top corners stack downward.
+        var yOrigin = corner.isTop ? screenFrame.maxY - thumbSize.height - padding : screenFrame.minY + padding
         if let topController = thumbnailControllers.last {
             let topFrame = topController.windowFrame
-            yOrigin = topFrame.maxY + gap
+            yOrigin = corner.isTop ? topFrame.minY - thumbSize.height - gap : topFrame.maxY + gap
         }
 
         let controller = FloatingThumbnailController(image: image)
@@ -1489,7 +1492,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             self?.saveAllThumbnailsToFolder()
         }
         thumbnailControllers.append(controller)
-        controller.show(atY: yOrigin)
+        controller.show(at: NSPoint(x: xOrigin, y: yOrigin), corner: corner)
     }
 
     private func saveAllThumbnailsToFolder() {
@@ -1536,12 +1539,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let screen = NSScreen.main ?? NSScreen.screens[0]
         let padding: CGFloat = 16
         let gap: CGFloat = 8
-        var y = screen.visibleFrame.minY + padding
+        let frame = screen.visibleFrame
+        let corner = thumbnailCorner()
+        var y = corner.isTop ? frame.maxY - padding : frame.minY + padding
         for c in thumbnailControllers {
-            let h = c.windowFrame.height  // height doesn't change, only Y moves
-            c.moveTo(y: y)
-            y += h + gap
+            let size = c.windowFrame.size
+            let x = thumbnailX(for: size.width, in: frame, corner: corner, padding: padding)
+            let yOrigin: CGFloat
+            if corner.isTop {
+                y -= size.height
+                yOrigin = y
+                y -= gap
+            } else {
+                yOrigin = y
+                y += size.height + gap
+            }
+            c.moveTo(origin: NSPoint(x: x, y: yOrigin))
         }
+    }
+
+    private func thumbnailCorner() -> FloatingThumbnailCorner {
+        let rawValue = UserDefaults.standard.string(forKey: "thumbnailCorner") ?? FloatingThumbnailCorner.bottomRight.rawValue
+        return FloatingThumbnailCorner(rawValue: rawValue) ?? .bottomRight
+    }
+
+    private func thumbnailX(
+        for width: CGFloat,
+        in frame: NSRect,
+        corner: FloatingThumbnailCorner,
+        padding: CGFloat
+    ) -> CGFloat {
+        corner.isLeft ? frame.minX + padding : frame.maxX - width - padding
     }
 
     /// Update a floating thumbnail's image if it matches the given history entry.
