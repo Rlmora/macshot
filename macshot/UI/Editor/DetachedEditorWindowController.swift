@@ -634,7 +634,7 @@ private class AddCaptureOverlayHandler: NSObject, OverlayWindowControllerDelegat
         }
     }
 
-    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage) {
+    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage, sourceRect: NSRect?) {
         dismissOverlays()
         onCapture?(image)
     }

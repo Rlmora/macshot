@@ -207,12 +207,10 @@ private struct ScratchDirectoryCleaner: LaunchCleaner {
 
 /// Sweeps everything in `tmp/macshot-clipboard/` older than 24 hours.
 ///
-/// `ImageEncoder.copyToClipboard` writes a date-stamped PNG here and
-/// deletes the previous one on the next copy — at most one file ever
-/// lives here during normal use. This sweeper is a backstop for the
-/// case where macshot crashed or force-quit between writes, leaving an
-/// orphan. 24h TTL so we never race with a file that's currently
-/// referenced on the pasteboard.
+/// `ImageEncoder.copyToClipboard` writes a date-stamped PNG here for
+/// Finder/app paste support. Each copy keeps its own file because older
+/// pasteboards can still reference earlier URLs. 24h TTL keeps delayed
+/// pastes working while bounding disk usage.
 private struct ClipboardDirectoryCleaner: LaunchCleaner {
     let name = "ClipboardDirectoryCleaner"
     private let ttl: TimeInterval = 24 * 60 * 60

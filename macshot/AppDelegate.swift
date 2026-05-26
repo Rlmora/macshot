@@ -232,10 +232,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
         migrateFilenameTemplateIfNeeded()
 
-        // Touch the clipboard tmp dir early so it adopts any leftover file
-        // BEFORE the sweep runs — otherwise the sweeper might delete the
-        // leftover while the adoption code was about to claim it, and we'd
-        // end up with a stale `currentClipboardFileURL` pointing at nothing.
+        // Touch the clipboard tmp dir early so launch cleanup has a stable
+        // directory to sweep.
         _ = ImageEncoder.clipboardTmpDirectory
 
         // Reclaim disk from stale tmp leftovers (cancelled recordings,
@@ -656,6 +654,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         HotkeyManager.applyMenuShortcut(for: .openFromClipboard, to: pasteImageItem)
         menu.addItem(pasteImageItem)
 
+        let pinClipboardItem = NSMenuItem(title: L("Pin from Clipboard"), action: #selector(pinImageFromClipboard), keyEquivalent: "")
+        pinClipboardItem.target = self
+        pinClipboardItem.image = NSImage(systemSymbolName: "pin.square", accessibilityDescription: nil)
+        HotkeyManager.applyMenuShortcut(for: .pinFromClipboard, to: pinClipboardItem)
+        menu.addItem(pinClipboardItem)
+
         menu.addItem(NSMenuItem.separator())
 
         let prefsItem = NSMenuItem(title: L("Settings..."), action: #selector(openSettings), keyEquivalent: ",")
@@ -743,6 +747,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             captureLastArea: { [weak self] in
                 stamp()
                 self?.perform(#selector(AppDelegate.captureLastAreaFromHotkey))
+            },
+            pinFromClipboard: { [weak self] in
+                DispatchQueue.main.async { self?.pinImageFromClipboard() }
             }
         )
     }
@@ -1674,8 +1681,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         showPin(image: image)
     }
 
-    func showPin(image: NSImage) {
-        let pin = PinWindowController(image: image)
+    func showPin(image: NSImage, sourceRect: NSRect? = nil) {
+        let pin = PinWindowController(image: image, initialScreenRect: sourceRect)
         pin.delegate = self
         pin.show()
         pinControllers.append(pin)
@@ -1759,18 +1766,69 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     @objc private func openImageFromClipboard() {
-        let pasteboard = NSPasteboard.general
-        guard let image = NSImage(pasteboard: pasteboard), image.isValid,
-              image.size.width > 0, image.size.height > 0 else {
-            let alert = NSAlert()
-            alert.messageText = L("No Image on Clipboard")
-            alert.informativeText = L("Copy an image to the clipboard first, then try again.")
-            alert.alertStyle = .informational
-            alert.addButton(withTitle: L("OK"))
-            alert.runModal()
-            return
-        }
+        guard let image = imageFromClipboard() else { showNoClipboardImageAlert(); return }
         DetachedEditorWindowController.open(image: image)
+    }
+
+    @objc private func pinImageFromClipboard() {
+        if pinActiveOverlaySelection() { return }
+        guard let image = imageFromClipboard() else { showNoClipboardImageAlert(); return }
+        showPin(image: image)
+    }
+
+    private func pinActiveOverlaySelection() -> Bool {
+        guard let controller = overlayControllers.first(where: { $0.canPinCurrentSelection }) else {
+            return false
+        }
+        controller.requestPinCurrentSelection()
+        return true
+    }
+
+    private func imageFromClipboard() -> NSImage? {
+        let pasteboard = NSPasteboard.general
+        if let image = NSImage(pasteboard: pasteboard), isUsableImage(image) {
+            return image
+        }
+        guard let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) else {
+            return nil
+        }
+        for object in objects {
+            let url: URL?
+            if let value = object as? URL {
+                url = value
+            } else if let value = object as? NSURL {
+                url = value as URL
+            } else {
+                url = nil
+            }
+            guard let url else { continue }
+            guard isImageFileURL(url) else { continue }
+            if let image = NSImage(contentsOf: url), isUsableImage(image) {
+                return image
+            }
+        }
+        return nil
+    }
+
+    private func isUsableImage(_ image: NSImage) -> Bool {
+        image.isValid && image.size.width > 0 && image.size.height > 0
+    }
+
+    private func isImageFileURL(_ url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        guard let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType else {
+            return false
+        }
+        return type.conforms(to: .image)
+    }
+
+    private func showNoClipboardImageAlert() {
+        let alert = NSAlert()
+        alert.messageText = L("No Image on Clipboard")
+        alert.informativeText = L("Copy an image to the clipboard first, then try again.")
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: L("OK"))
+        alert.runModal()
     }
 
     private func openImageWithPanel() {
@@ -2021,11 +2079,11 @@ extension AppDelegate: OverlayWindowControllerDelegate {
         return NSImage(cgImage: cgImage, size: globalRect.size)
     }
 
-    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage) {
+    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage, sourceRect: NSRect?) {
         ScreenshotHistory.shared.add(image: image)
         let appToRefocus = previousApp
         dismissOverlays(refocusPreviousApp: false)
-        let pin = PinWindowController(image: image)
+        let pin = PinWindowController(image: image, initialScreenRect: sourceRect)
         pin.delegate = self
         pin.show()
         pinControllers.append(pin)

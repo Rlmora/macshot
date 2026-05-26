@@ -57,7 +57,7 @@ private final class ScreenshotOverlayRootView: NSView {
 protocol OverlayWindowControllerDelegate: AnyObject {
     func overlayDidCancel(_ controller: OverlayWindowController)
     func overlayDidConfirm(_ controller: OverlayWindowController, capturedImage: NSImage?, annotationData: CaptureAnnotationData?)
-    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage)
+    func overlayDidRequestPin(_ controller: OverlayWindowController, image: NSImage, sourceRect: NSRect?)
     func overlayDidRequestOCR(_ controller: OverlayWindowController, text: String, image: NSImage?)
     func overlayDidRequestUpload(_ controller: OverlayWindowController, image: NSImage)
     func overlayDidRequestStartRecording(
@@ -102,6 +102,14 @@ class OverlayWindowController {
     var screenshotImage: NSImage? { overlayView?.screenshotImage }
     var selectionRect: NSRect { overlayView?.selectionRect ?? .zero }
     var remoteSelectionRect: NSRect { overlayView?.remoteSelectionRect ?? .zero }
+    var canPinCurrentSelection: Bool {
+        guard let view = overlayView else { return false }
+        return view.state == .selected
+            && view.selectionRect.width > 1
+            && view.selectionRect.height > 1
+            && !view.isRecording
+            && !view.isScrollCapturing
+    }
 
     // Session recording overrides (from toolbar popover, nil = use UserDefaults default)
     var sessionRecordingFPS: Int? { overlayView?.sessionRecordingFPS }
@@ -285,6 +293,11 @@ class OverlayWindowController {
     /// Set flag so overlay auto-confirms immediately after selection (no toolbars, no save).
     func setAutoConfirmMode() {
         overlayView?.autoConfirmMode = true
+    }
+
+    func requestPinCurrentSelection() {
+        guard canPinCurrentSelection else { return }
+        overlayViewDidRequestPin()
     }
 
     /// Enter recording mode — shows recording toolbar buttons in the normal toolbar.
@@ -537,11 +550,23 @@ extension OverlayWindowController: OverlayViewDelegate {
     }
 
     func overlayViewDidRequestPin() {
+        overlayView?.commitTextFieldIfNeeded()
         guard var image = captureRegion() else { return }
         image = applyBeautifyIfNeeded(image) ?? image
+        let sourceRect: NSRect?
+        if let rect = overlayView?.selectionRect, rect.width > 0, rect.height > 0 {
+            sourceRect = NSRect(
+                x: screen.frame.minX + rect.minX,
+                y: screen.frame.minY + rect.minY,
+                width: rect.width,
+                height: rect.height
+            )
+        } else {
+            sourceRect = nil
+        }
         playCopySound()
         dismiss()
-        overlayDelegate?.overlayDidRequestPin(self, image: image)
+        overlayDelegate?.overlayDidRequestPin(self, image: image, sourceRect: sourceRect)
     }
 
     func overlayViewDidRequestOCR() {

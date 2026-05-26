@@ -18,24 +18,43 @@ class PinWindowController {
     private static let minScale: CGFloat = 0.1
     private static let maxScale: CGFloat = 5.0
 
-    init(image: NSImage) {
+    init(image: NSImage, initialScreenRect: NSRect? = nil) {
         self.image = image
 
         let size = image.size
-        let screen = NSScreen.main ?? NSScreen.screens[0]
+        let screen = initialScreenRect.flatMap { rect in
+            NSScreen.screens.first { $0.frame.intersects(rect) }
+        } ?? NSScreen.main ?? NSScreen.screens[0]
         let screenFrame = screen.visibleFrame
 
-        // Center on screen, cap at 80% of screen size
+        // Snipaste-style pinning: if the capture origin is known, paste back
+        // over that screen area. Clipboard/history pins have no source rect,
+        // so they use the normal centered placement.
         let maxW = screenFrame.width * 0.8
         let maxH = screenFrame.height * 0.8
-        let scale = min(1.0, min(maxW / size.width, maxH / size.height))
-        let windowSize = NSSize(width: size.width * scale, height: size.height * scale)
+        let sourceSize: NSSize
+        if let rect = initialScreenRect,
+           abs((rect.width / rect.height) - (size.width / size.height)) < 0.01 {
+            sourceSize = rect.size
+        } else {
+            sourceSize = size
+        }
+        let scale = min(1.0, min(maxW / sourceSize.width, maxH / sourceSize.height))
+        let windowSize = NSSize(width: sourceSize.width * scale, height: sourceSize.height * scale)
         self.initialWindowSize = windowSize
 
-        let origin = NSPoint(
-            x: screenFrame.midX - windowSize.width / 2,
-            y: screenFrame.midY - windowSize.height / 2
-        )
+        let origin: NSPoint
+        if let rect = initialScreenRect {
+            origin = NSPoint(
+                x: min(max(rect.minX, screenFrame.minX), screenFrame.maxX - windowSize.width),
+                y: min(max(rect.minY, screenFrame.minY), screenFrame.maxY - windowSize.height)
+            )
+        } else {
+            origin = NSPoint(
+                x: screenFrame.midX - windowSize.width / 2,
+                y: screenFrame.midY - windowSize.height / 2
+            )
+        }
 
         let panel = PinPanel(
             contentRect: NSRect(origin: origin, size: windowSize),
