@@ -1,5 +1,7 @@
 import Cocoa
+import CryptoKit
 import UniformTypeIdentifiers
+import Vision
 
 @MainActor
 protocol PinWindowControllerDelegate: AnyObject {
@@ -11,15 +13,20 @@ class PinWindowController {
 
     weak var delegate: PinWindowControllerDelegate?
 
-    private var window: NSPanel?
+    let pinIdentity: String
+
+    private var window: PinPanel?
     private var pinView: PinView?
-    private let image: NSImage
+    private var editorView: PinEditorView?
+    private var ocrController: OCRResultController?
+    private var currentImage: NSImage
     private let initialWindowSize: NSSize
     private static let minScale: CGFloat = 0.1
     private static let maxScale: CGFloat = 5.0
 
     init(image: NSImage, initialScreenRect: NSRect? = nil) {
-        self.image = image
+        self.currentImage = image
+        self.pinIdentity = Self.identity(for: image)
 
         let size = image.size
         let screen = initialScreenRect.flatMap { rect in
@@ -34,6 +41,8 @@ class PinWindowController {
         let maxH = screenFrame.height * 0.8
         let sourceSize: NSSize
         if let rect = initialScreenRect,
+           rect.height > 0,
+           size.height > 0,
            abs((rect.width / rect.height) - (size.width / size.height)) < 0.01 {
             sourceSize = rect.size
         } else {
@@ -62,6 +71,7 @@ class PinWindowController {
             backing: .buffered,
             defer: false
         )
+        panel.pinController = self
         panel.level = .floating
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -71,36 +81,42 @@ class PinWindowController {
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentAspectRatio = size
-        // Allow scroll/magnify events to reach the view even when panel is not key
         panel.becomesKeyOnlyIfNeeded = true
 
-        let view = PinView(image: image)
-        view.frame = NSRect(origin: .zero, size: windowSize)
-        view.autoresizingMask = [.width, .height]
-        view.onClose = { [weak self] in
-            self?.close()
-        }
-        view.onEdit = { [weak self] in
-            self?.openInEditor()
-        }
-        view.onZoom = { [weak self] factor, viewPoint in
-            self?.zoom(by: factor, around: viewPoint)
-        }
-        view.onResetZoom = { [weak self] in
-            self?.resetZoom()
-        }
-
+        let view = makePinView(image: image, frame: NSRect(origin: .zero, size: windowSize))
         panel.contentView = view
         self.window = panel
         self.pinView = view
     }
 
+    static func identity(for image: NSImage) -> String {
+        guard let data = ImageEncoder.pngData(for: image) ?? image.tiffRepresentation else {
+            return "\(image.size.width)x\(image.size.height)"
+        }
+        return Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func makePinView(image: NSImage, frame: NSRect) -> PinView {
+        let view = PinView(image: image)
+        view.frame = frame
+        view.autoresizingMask = [.width, .height]
+        view.onClose = { [weak self] in self?.close() }
+        view.onEdit = { [weak self] in self?.toggleEditing() }
+        view.onCopy = { [weak self] in self?.copyCurrentImage() }
+        view.onSave = { [weak self] in self?.saveCurrentImage(showPanel: true) }
+        view.onToggleShadow = { [weak self] in self?.toggleShadow() }
+        view.onZoom = { [weak self] factor, viewPoint in
+            self?.zoom(by: factor, around: viewPoint)
+        }
+        view.onResetZoom = { [weak self] in self?.resetZoom() }
+        return view
+    }
+
     private func zoom(by factor: CGFloat, around viewPoint: NSPoint) {
-        guard let window = window else { return }
+        guard editorView == nil, let window = window else { return }
         let oldFrame = window.frame
         let oldSize = oldFrame.size
 
-        // Compute new size, clamped
         let currentScale = oldSize.width / initialWindowSize.width
         let newScale = min(Self.maxScale, max(Self.minScale, currentScale * factor))
         if abs(newScale - currentScale) < 0.001 { return }
@@ -110,7 +126,6 @@ class PinWindowController {
             height: round(initialWindowSize.height * newScale)
         )
 
-        // Anchor: the screen point under the cursor stays fixed
         let cursorScreenPoint = NSPoint(
             x: oldFrame.origin.x + viewPoint.x,
             y: oldFrame.origin.y + viewPoint.y
@@ -127,7 +142,7 @@ class PinWindowController {
     }
 
     private func resetZoom() {
-        guard let window = window else { return }
+        guard editorView == nil, let window = window else { return }
         let oldFrame = window.frame
         let centerX = oldFrame.midX
         let centerY = oldFrame.midY
@@ -140,7 +155,22 @@ class PinWindowController {
     }
 
     func show() {
-        window?.orderFrontRegardless()
+        bringToFront()
+    }
+
+    var isClosed: Bool {
+        window == nil
+    }
+
+    func bringToFront() {
+        guard let window else { return }
+        window.orderFrontRegardless()
+        window.makeKey()
+        if let editorView {
+            window.makeFirstResponder(editorView)
+        } else if let pinView {
+            window.makeFirstResponder(pinView)
+        }
     }
 
     func close() {
@@ -148,24 +178,173 @@ class PinWindowController {
         window?.close()
         window = nil
         pinView = nil
+        editorView = nil
         delegate?.pinWindowDidClose(self)
     }
 
-    private func openInEditor() {
-        DetachedEditorWindowController.open(image: image)
-        close()
+    func toggleEditing() {
+        if editorView == nil {
+            enterEditing()
+        } else {
+            finishEditing()
+        }
+    }
+
+    private func enterEditing() {
+        guard let window, editorView == nil else { return }
+        pinView = nil
+        window.isMovableByWindowBackground = false
+
+        let view = PinEditorView()
+        view.frame = NSRect(origin: .zero, size: window.contentView?.bounds.size ?? window.frame.size)
+        view.autoresizingMask = [.width, .height]
+        view.screenshotImage = currentImage
+        view.captureSourceImage = currentImage
+        view.overlayDelegate = self
+        view.applySelection(NSRect(origin: .zero, size: currentImage.size))
+
+        window.contentView = view
+        editorView = view
+        window.makeFirstResponder(view)
+    }
+
+    private func finishEditing() {
+        guard let window, let editorView else { return }
+        editorView.commitTextFieldIfNeeded()
+        if let image = editorView.captureSelectedRegion() {
+            currentImage = image
+        }
+
+        let view = makePinView(
+            image: currentImage,
+            frame: NSRect(origin: .zero, size: window.contentView?.bounds.size ?? window.frame.size))
+        window.contentView = view
+        self.editorView = nil
+        self.pinView = view
+        window.isMovableByWindowBackground = true
+        window.contentAspectRatio = currentImage.size
+        window.makeFirstResponder(view)
+    }
+
+    private func toggleShadow() {
+        window?.hasShadow.toggle()
+    }
+
+    private func copyCurrentImage() {
+        if editorView != nil { finishEditing() }
+        ImageEncoder.copyToClipboard(currentImage)
+    }
+
+    private func saveCurrentImage(showPanel: Bool) {
+        if editorView != nil { finishEditing() }
+        guard let imageData = ImageEncoder.encode(currentImage) else { return }
+        if showPanel {
+            let savePanel = NSSavePanel()
+            savePanel.allowedContentTypes = [ImageEncoder.utType]
+            savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
+            savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
+            savePanel.begin { response in
+                if response == .OK, let url = savePanel.url {
+                    try? imageData.write(to: url)
+                }
+            }
+        } else {
+            let dirURL = SaveDirectoryAccess.resolve()
+            let fileURL = dirURL.appendingPathComponent(FilenameFormatter.defaultImageFilename())
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? imageData.write(to: fileURL)
+                SaveDirectoryAccess.stopAccessing(url: dirURL)
+            }
+        }
+    }
+
+    private func shareCurrentImage(anchorView: NSView?) {
+        if editorView != nil { finishEditing() }
+        guard let imageData = ImageEncoder.encode(currentImage) else { return }
+        let tempURL = TmpScratchDirectory.makeURL(filename: FilenameFormatter.defaultImageFilename())
+        try? imageData.write(to: tempURL)
+        let picker = NSSharingServicePicker(items: [tempURL])
+        if let anchorView {
+            picker.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minX)
+        } else if let view = pinView ?? editorView {
+            picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
+        }
+    }
+
+    private func uploadCurrentImage() {
+        if editorView != nil { finishEditing() }
+        (NSApp.delegate as? AppDelegate)?.uploadImage(currentImage)
+    }
+
+    private func requestOCR() {
+        if editorView != nil { finishEditing() }
+        guard let cgImage = currentImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            VisionOCR.performTextRecognition(cgImage: cgImage) { req, _ in
+                let lines = (req.results as? [VNRecognizedTextObservation])?.compactMap {
+                    $0.topCandidates(1).first?.string
+                } ?? []
+                let text = lines.joined(separator: "\n")
+                DispatchQueue.main.async {
+                    let action = UserDefaults.standard.integer(forKey: "ocrAction")
+                    if (action == 0 || action == 2) && !text.isEmpty {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                    if action == 0 || action == 1 {
+                        let controller = OCRResultController(text: text, image: self.currentImage)
+                        self.ocrController = controller
+                        controller.show()
+                    }
+                }
+            }
+        }
     }
 }
 
-// MARK: - Pin Panel (receives gesture events without activating the app)
+// MARK: - OverlayViewDelegate
+
+extension PinWindowController: OverlayViewDelegate {
+    func overlayViewDidFinishSelection(_ rect: NSRect) {}
+    func overlayViewSelectionDidChange(_ rect: NSRect) {}
+    func overlayViewDidBeginSelection() {}
+    func overlayViewRemoteSelectionDidChange(_ rect: NSRect) {}
+    func overlayViewRemoteSelectionDidFinish(_ rect: NSRect) {}
+    func overlayViewDidCancel() { finishEditing() }
+    func overlayViewDidConfirm() { copyCurrentImage() }
+    func overlayViewDidRequestSave() { saveCurrentImage(showPanel: true) }
+    func overlayViewDidRequestFileSave() { saveCurrentImage(showPanel: false) }
+    func overlayViewDidRequestPin() { finishEditing(); bringToFront() }
+    func overlayViewDidRequestOCR() { requestOCR() }
+    func overlayViewDidRequestQuickSave() { copyCurrentImage() }
+    func overlayViewDidRequestUpload() { uploadCurrentImage() }
+    func overlayViewDidRequestShare(anchorView: NSView?) { shareCurrentImage(anchorView: anchorView) }
+    func overlayViewDidRequestEnterRecordingMode() {}
+    func overlayViewDidRequestStartRecording(rect: NSRect) {}
+    func overlayViewDidRequestStopRecording() {}
+    func overlayViewDidRequestDetach() { finishEditing() }
+    func overlayViewDidRequestScrollCapture(rect: NSRect) {}
+    func overlayViewDidRequestStopScrollCapture() {}
+    func overlayViewDidRequestToggleAutoScroll() {}
+    func overlayViewDidRequestAccessibilityPermission() {}
+    func overlayViewDidRequestInputMonitoringPermission() {}
+    func overlayViewDidChangeWindowSnapState() {}
+    func overlayViewDidRequestAddCapture() {}
+
+    @available(macOS 14.0, *)
+    func overlayViewDidRequestRemoveBackground() {}
+}
+
+// MARK: - Pin Panel
 
 private class PinPanel: NSPanel {
+    weak var pinController: PinWindowController?
+
     override var canBecomeKey: Bool { true }
 
-    // Don't let Cmd+Q propagate to the app — just close the pin
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.keyCode == 12 {  // Q
-            (contentView as? PinView)?.onClose?()
+        if event.modifierFlags.contains(.command) && event.keyCode == 12 {
+            pinController?.close()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -178,6 +357,9 @@ private class PinView: NSView {
 
     var onClose: (() -> Void)?
     var onEdit: (() -> Void)?
+    var onCopy: (() -> Void)?
+    var onSave: (() -> Void)?
+    var onToggleShadow: (() -> Void)?
     var onZoom: ((CGFloat, NSPoint) -> Void)?
     var onResetZoom: (() -> Void)?
 
@@ -202,8 +384,9 @@ private class PinView: NSView {
         setupButtons()
     }
 
+    @available(*, unavailable)
     required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
+        nil
     }
 
     private func makeOverlayButton(symbol: String, action: Selector) -> NSButton {
@@ -281,12 +464,10 @@ private class PinView: NSView {
 
     override func layout() {
         super.layout()
-        // Close button top-right, edit button to its left, zoom label to its left
         let btnSize: CGFloat = 24
         let btnY = bounds.maxY - 30
-        let btnCenterY = btnY + btnSize / 2
         closeButton?.frame = NSRect(x: bounds.maxX - 30, y: btnY, width: btnSize, height: btnSize)
-        editButton?.frame  = NSRect(x: bounds.maxX - 58, y: btnY, width: btnSize, height: btnSize)
+        editButton?.frame = NSRect(x: bounds.maxX - 58, y: btnY, width: btnSize, height: btnSize)
         if let label = zoomLabel {
             let labelW = max(label.intrinsicContentSize.width + 14, 42)
             label.frame = NSRect(
@@ -303,20 +484,22 @@ private class PinView: NSView {
         path.addClip()
         image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
 
-        // Subtle border
         NSColor.white.withAlphaComponent(0.3).setStroke()
         let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
         border.lineWidth = 1
         border.stroke()
     }
 
-    // Right-click context menu
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Copy to Clipboard", action: #selector(copyImage), keyEquivalent: "c")
-        menu.addItem(withTitle: "Save As...", action: #selector(saveImage), keyEquivalent: "s")
+        menu.addItem(withTitle: L("Copy to Clipboard"), action: #selector(copyImage), keyEquivalent: "c")
+        menu.addItem(withTitle: L("Save As..."), action: #selector(saveImage), keyEquivalent: "s")
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Close", action: #selector(closeClicked), keyEquivalent: "")
+        menu.addItem(withTitle: L("Edit"), action: #selector(editClicked), keyEquivalent: "")
+        let shadowItem = menu.addItem(withTitle: L("Shadow"), action: #selector(toggleShadow), keyEquivalent: "")
+        shadowItem.state = window?.hasShadow == true ? .on : .off
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: L("Close"), action: #selector(closeClicked), keyEquivalent: "")
         for item in menu.items {
             item.target = self
         }
@@ -324,26 +507,23 @@ private class PinView: NSView {
     }
 
     @objc private func copyImage() {
-        ImageEncoder.copyToClipboard(image)
+        onCopy?()
     }
 
     @objc private func saveImage() {
-        guard let imageData = ImageEncoder.encode(image) else { return }
+        onSave?()
+    }
 
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [ImageEncoder.utType]
-        savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
-
-        savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
-
-        savePanel.begin { response in
-            if response == .OK, let url = savePanel.url {
-                try? imageData.write(to: url)
-            }
-        }
+    @objc private func toggleShadow() {
+        onToggleShadow?()
     }
 
     override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        if event.clickCount >= 2 {
+            onClose?()
+            return
+        }
         let loc = convert(event.locationInWindow, from: nil)
         if let label = zoomLabel, !label.isHidden, label.frame.contains(loc) {
             onResetZoom?()
@@ -352,33 +532,92 @@ private class PinView: NSView {
         super.mouseDown(with: event)
     }
 
-    // Scroll to zoom (mouse wheel and trackpad two-finger scroll)
     override func scrollWheel(with event: NSEvent) {
         let delta = event.scrollingDeltaY
         guard abs(delta) > 0.01 else { return }
-        // Trackpad sends fine-grained deltas; mouse wheel sends larger discrete steps
         let sensitivity: CGFloat = event.hasPreciseScrollingDeltas ? 0.005 : 0.03
         let factor: CGFloat = 1.0 + delta * sensitivity
         let loc = convert(event.locationInWindow, from: nil)
         onZoom?(factor, loc)
     }
 
-    // Pinch to zoom
     override func magnify(with event: NSEvent) {
         let factor = 1.0 + event.magnification
         let loc = convert(event.locationInWindow, from: nil)
         onZoom?(factor, loc)
     }
 
-    // Keyboard: Escape to close
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { // Escape
+        switch event.keyCode {
+        case 49:
+            onEdit?()
+        case 53:
             onClose?()
-        } else {
+        default:
             super.keyDown(with: event)
         }
+    }
+}
+
+// MARK: - Inline Pin Editor
+
+private class PinEditorView: OverlayView {
+    override var isEditorMode: Bool { true }
+    override var shouldShowRightToolbar: Bool { false }
+    override func shouldAllowNewSelection() -> Bool { false }
+    override func shouldAllowSelectionResize() -> Bool { false }
+    override func shouldAllowDetach() -> Bool { false }
+
+    override func drawEditorBackground(context: NSGraphicsContext) {
+        NSColor.black.withAlphaComponent(0.12).setFill()
+        NSBezierPath(rect: bounds).fill()
+        if let image = screenshotImage {
+            image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
+        }
+    }
+
+    override func adjustPointForEditor(_ p: NSPoint) -> NSPoint {
+        guard bounds.width > 0, bounds.height > 0,
+              selectionRect.width > 0, selectionRect.height > 0 else { return p }
+        return NSPoint(
+            x: p.x * selectionRect.width / bounds.width,
+            y: p.y * selectionRect.height / bounds.height
+        )
+    }
+
+    override func canvasToView(_ p: NSPoint) -> NSPoint {
+        guard selectionRect.width > 0, selectionRect.height > 0 else { return p }
+        return NSPoint(
+            x: p.x * bounds.width / selectionRect.width,
+            y: p.y * bounds.height / selectionRect.height
+        )
+    }
+
+    override func applyEditorTransform(to context: NSGraphicsContext) {
+        guard selectionRect.width > 0, selectionRect.height > 0 else { return }
+        context.cgContext.scaleBy(
+            x: bounds.width / selectionRect.width,
+            y: bounds.height / selectionRect.height
+        )
+    }
+
+    override var captureDrawRect: NSRect { selectionRect }
+
+    override func keyDown(with event: NSEvent) {
+        if let textView = textEditView {
+            if window?.firstResponder !== textView {
+                window?.makeFirstResponder(textView)
+            }
+            textView.keyDown(with: event)
+            return
+        }
+        if event.keyCode == 49 {
+            overlayDelegate?.overlayViewDidCancel()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 

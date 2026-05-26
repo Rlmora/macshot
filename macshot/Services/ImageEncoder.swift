@@ -58,7 +58,7 @@ enum ImageEncoder {
     /// This is the single conversion point — all encode paths go through here.
     /// Uses cgImage(forProposedRect:) instead of tiffRepresentation to preserve
     /// exact pixel data regardless of the current display's backing scale factor.
-    private static func makeBitmap(_ image: NSImage) -> NSBitmapImageRep? {
+    private static func makeBitmap(_ image: NSImage, downscale: Bool = downscaleRetina) -> NSBitmapImageRep? {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             // Fallback for images without a CGImage backing (e.g. PDF/EPS vectors)
             guard let tiffData = image.tiffRepresentation,
@@ -67,7 +67,7 @@ enum ImageEncoder {
         }
         let bitmap = NSBitmapImageRep(cgImage: cgImage)
 
-        if downscaleRetina {
+        if downscale {
             let logicalW = Int(image.size.width)
             let logicalH = Int(image.size.height)
             let pixelW = bitmap.pixelsWide
@@ -118,6 +118,13 @@ enum ImageEncoder {
             return bitmap.representation(using: .png, properties: [:])
         }
         return encodeWithCGImageDestination(cgImage: cgImage, type: "public.png", lossyQuality: nil)
+    }
+
+    /// Stable PNG bytes for features that need image identity independent of
+    /// the user's configured output format.
+    static func pngData(for image: NSImage) -> Data? {
+        guard let bitmap = makeBitmap(image, downscale: false) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
     }
 
     /// Encode JPEG with native color profile embedded.

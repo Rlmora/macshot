@@ -39,6 +39,7 @@
 
 /* History Panel */
 "Copy" = "拷贝";
+"Edit" = "编辑";
 "Save As..." = "存储为...";
 "Open in Editor" = "在编辑器中打开";
 "Pin to Screen" = "固定到屏幕";

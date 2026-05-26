@@ -164,6 +164,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var settingsController: SettingsWindowController?
     private var onboardingController: PermissionOnboardingController?
     private var pinControllers: [PinWindowController] = []
+    private var pinControllersByIdentity: [String: PinWindowController] = [:]
     private var thumbnailControllers: [FloatingThumbnailController] = []
     private var ocrController: OCRResultController?
     private var historyMenu: NSMenu?
@@ -1682,10 +1683,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     func showPin(image: NSImage, sourceRect: NSRect? = nil) {
+        let identity = PinWindowController.identity(for: image)
+        if let existing = pinControllersByIdentity[identity], !existing.isClosed {
+            existing.bringToFront()
+            return
+        }
         let pin = PinWindowController(image: image, initialScreenRect: sourceRect)
         pin.delegate = self
         pin.show()
         pinControllers.append(pin)
+        pinControllersByIdentity[identity] = pin
     }
 
     private func showUploadProgress(image: NSImage) {
@@ -2083,10 +2090,7 @@ extension AppDelegate: OverlayWindowControllerDelegate {
         ScreenshotHistory.shared.add(image: image)
         let appToRefocus = previousApp
         dismissOverlays(refocusPreviousApp: false)
-        let pin = PinWindowController(image: image, initialScreenRect: sourceRect)
-        pin.delegate = self
-        pin.show()
-        pinControllers.append(pin)
+        showPin(image: image, sourceRect: sourceRect)
         // Return focus to previous app — pin stays visible (hidesOnDeactivate=false, orderFrontRegardless)
         if let app = appToRefocus, !app.isTerminated, app.bundleIdentifier != Bundle.main.bundleIdentifier {
             DispatchQueue.main.async { AppDelegate.activateApp(app) }
@@ -2821,6 +2825,9 @@ extension AppDelegate: OverlayWindowControllerDelegate {
 extension AppDelegate: PinWindowControllerDelegate {
     func pinWindowDidClose(_ controller: PinWindowController) {
         pinControllers.removeAll { $0 === controller }
+        if pinControllersByIdentity[controller.pinIdentity] === controller {
+            pinControllersByIdentity.removeValue(forKey: controller.pinIdentity)
+        }
     }
 }
 

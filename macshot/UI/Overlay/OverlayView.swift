@@ -1352,6 +1352,9 @@ class OverlayView: NSView {
     /// Override to change the rect used when drawing the screenshot in `captureSelectedRegion`. Base returns bounds.
     var captureDrawRect: NSRect { isEditorMode ? selectionRect : bounds }
 
+    /// Override to hide output actions in specialized embedded editors.
+    var shouldShowRightToolbar: Bool { true }
+
     /// Override to position toolbars for editor mode. Base pins bottom bar centered at bottom, right bar at top-right.    /// Override to control whether detach (open in editor) is allowed. Base returns true when not in editor mode.
     func shouldAllowDetach() -> Bool { !isEditorMode }
 
@@ -4140,11 +4143,13 @@ class OverlayView: NSView {
                 }
             }
         }
-        rightButtons = ToolbarLayout.rightButtons(
-            beautifyEnabled: beautifyEnabled, beautifyStyleIndex: beautifyStyleIndex,
-            hasAnnotations: movableAnnotations, translateEnabled: translateEnabled,
-            isRecording: isRecording,
-            isEditorMode: isEditorMode)
+        rightButtons = shouldShowRightToolbar
+            ? ToolbarLayout.rightButtons(
+                beautifyEnabled: beautifyEnabled, beautifyStyleIndex: beautifyStyleIndex,
+                hasAnnotations: movableAnnotations, translateEnabled: translateEnabled,
+                isRecording: isRecording,
+                isEditorMode: isEditorMode)
+            : []
 
         // Create strip views if needed — add to chrome parent (window content) when in scroll view
         let parent = chromeParentView ?? self

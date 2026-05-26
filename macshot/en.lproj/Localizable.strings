@@ -38,6 +38,7 @@
 
 /* History Panel */
 "Copy" = "Copy";
+"Edit" = "Edit";
 "Save As..." = "Save As...";
 "Open in Editor" = "Open in Editor";
 "Pin to Screen" = "Pin to Screen";
