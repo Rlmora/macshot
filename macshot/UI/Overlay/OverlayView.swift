@@ -1363,7 +1363,35 @@ class OverlayView: NSView {
     /// Override to hide output actions in specialized embedded editors.
     var shouldShowRightToolbar: Bool { true }
 
-    /// Override to position toolbars for editor mode. Base pins bottom bar centered at bottom, right bar at top-right.    /// Override to control whether detach (open in editor) is allowed. Base returns true when not in editor mode.
+    /// Override to position toolbars for editor mode. Base pins bottom bar centered at bottom, right bar at top-right.
+    func positionEditorToolbarStrips(
+        bottomStrip: ToolbarStripView,
+        rightStrip: ToolbarStripView,
+        bottomSize: NSSize,
+        rightSize: NSSize,
+        containerBounds: NSRect
+    ) {
+        bottomStrip.frame.origin = NSPoint(x: containerBounds.midX - bottomSize.width / 2, y: 20)
+        bottomStrip.autoresizingMask = [.minXMargin, .maxXMargin, .maxYMargin]
+        rightStrip.frame.origin = NSPoint(
+            x: containerBounds.maxX - rightSize.width - 20,
+            y: containerBounds.maxY - rightSize.height - 36)
+        rightStrip.autoresizingMask = [.minXMargin, .minYMargin]
+    }
+
+    /// Override to position editor option rows. Base puts the row above the bottom toolbar.
+    func positionEditorOptionsRow(
+        _ row: ToolOptionsRowView,
+        rowWidth: CGFloat,
+        bottomBarRect: NSRect,
+        containerBounds: NSRect
+    ) {
+        let rowX = max(4, containerBounds.midX - rowWidth / 2)
+        row.frame.origin = NSPoint(x: rowX, y: bottomBarRect.maxY + 2)
+        row.autoresizingMask = [.minXMargin, .maxXMargin, .maxYMargin]
+    }
+
+    /// Override to control whether detach (open in editor) is allowed. Base returns true when not in editor mode.
     func shouldAllowDetach() -> Bool { !isEditorMode }
 
     /// Override to handle clicks on chrome areas. Base returns false.
@@ -4275,11 +4303,12 @@ class OverlayView: NSView {
 
         if isEditorMode {
             let cb = chromeParentView?.bounds ?? bounds
-            bottomStrip.frame.origin = NSPoint(x: cb.midX - bottomSize.width / 2, y: 20)
-            bottomStrip.autoresizingMask = [.minXMargin, .maxXMargin, .maxYMargin]
-            rightStrip.frame.origin = NSPoint(
-                x: cb.maxX - rightSize.width - 20, y: cb.maxY - rightSize.height - 36)
-            rightStrip.autoresizingMask = [.minXMargin, .minYMargin]
+            positionEditorToolbarStrips(
+                bottomStrip: bottomStrip,
+                rightStrip: rightStrip,
+                bottomSize: bottomSize,
+                rightSize: rightSize,
+                containerBounds: cb)
         } else {
             let optRowH: CGFloat = 38  // options row height + gap
 
@@ -4401,11 +4430,12 @@ class OverlayView: NSView {
             row.frame.size.width = rowW
             let rowY: CGFloat
             if isEditorMode {
-                // In editor mode, center the options row the same way as the bottom bar
                 let cb = chromeParentView?.bounds ?? bounds
-                let rowX = max(4, cb.midX - rowW / 2)
-                row.frame.origin = NSPoint(x: rowX, y: bottomBarRect.maxY + 2)
-                row.autoresizingMask = [.minXMargin, .maxXMargin, .maxYMargin]
+                positionEditorOptionsRow(
+                    row,
+                    rowWidth: rowW,
+                    bottomBarRect: bottomBarRect,
+                    containerBounds: cb)
             } else {
                 // Center the options row relative to the bottom bar, clamped to view bounds
                 var rowX = bottomBarRect.midX - rowW / 2

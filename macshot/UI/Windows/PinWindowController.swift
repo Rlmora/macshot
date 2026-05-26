@@ -18,11 +18,17 @@ class PinWindowController {
     private var window: PinPanel?
     private var pinView: PinView?
     private var editorView: PinEditorView?
+    private var preEditFrame: NSRect?
     private var ocrController: OCRResultController?
     private var currentImage: NSImage
     private let initialWindowSize: NSSize
     private static let minScale: CGFloat = 0.1
     private static let maxScale: CGFloat = 5.0
+    private static let editorChromeHeight: CGFloat = 104
+    private static let toolbarButtonSize: CGFloat = 32
+    private static let toolbarPadding: CGFloat = 4
+    private static let toolbarSpacing: CGFloat = 2
+    private static let editorHorizontalPadding: CGFloat = 8
 
     init(image: NSImage, initialScreenRect: NSRect? = nil) {
         self.currentImage = image
@@ -113,6 +119,48 @@ class PinWindowController {
         return view
     }
 
+    private static func editorChromeRequiredWidth() -> CGFloat {
+        let buttons = ToolbarLayout.bottomButtons(
+            selectedTool: .arrow,
+            selectedColor: .systemRed,
+            beautifyEnabled: false,
+            beautifyStyleIndex: 0,
+            hasAnnotations: false,
+            isRecording: false,
+            effectsActive: false)
+        let count = CGFloat(buttons.count)
+        let bottomWidth = count > 0
+            ? count * toolbarButtonSize + max(0, count - 1) * toolbarSpacing + toolbarPadding * 2
+            : 0
+
+        let strokeLabelWidth = (L("Stroke") as NSString).size(
+            withAttributes: [.font: NSFont.systemFont(ofSize: 9.5, weight: .medium)]
+        ).width
+        let outlineWidth = max(
+            50,
+            (L("Outline") as NSString).size(
+                withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .medium)]
+            ).width + 20
+        )
+        let flipWidth = max(
+            42,
+            (L("Flip") as NSString).size(
+                withAttributes: [.font: NSFont.systemFont(ofSize: 10, weight: .medium)]
+            ).width + 24
+        )
+
+        let arrowOptionsWidth: CGFloat =
+            8
+            + strokeLabelWidth + 4 + 100 + 4 + 28
+            + 13 + CGFloat(LineStyle.allCases.count) * 36
+            + 13 + CGFloat(ArrowStyle.allCases.count) * 30
+            + 13 + outlineWidth + 2 + 18
+            + 13 + flipWidth
+            + 8
+
+        return max(bottomWidth, arrowOptionsWidth) + editorHorizontalPadding * 2
+    }
+
     private func zoom(by factor: CGFloat, around viewPoint: NSPoint) {
         guard editorView == nil, let window = window else { return }
         let oldFrame = window.frame
@@ -180,6 +228,7 @@ class PinWindowController {
         window = nil
         pinView = nil
         editorView = nil
+        preEditFrame = nil
         delegate?.pinWindowDidClose(self)
     }
 
@@ -193,18 +242,58 @@ class PinWindowController {
 
     private func enterEditing() {
         guard let window, editorView == nil else { return }
+        let imageFrame = window.frame
+        let chromeHeight = Self.editorChromeHeight
+        let screenFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? imageFrame
+        let placeToolbarBelow = imageFrame.minY - chromeHeight >= screenFrame.minY
+
+        preEditFrame = imageFrame
         pinView = nil
         window.isMovableByWindowBackground = false
 
+        let requiredWidth = max(imageFrame.width, Self.editorChromeRequiredWidth())
+        let imageOffsetX = max(0, (requiredWidth - imageFrame.width) / 2)
+
+        var editorFrame = imageFrame
+        editorFrame.origin.x -= imageOffsetX
+        editorFrame.size.width = requiredWidth
+        editorFrame.size.height += chromeHeight
+        if placeToolbarBelow {
+            editorFrame.origin.y -= chromeHeight
+        }
+        if editorFrame.width <= screenFrame.width {
+            editorFrame.origin.x = min(max(editorFrame.origin.x, screenFrame.minX), screenFrame.maxX - editorFrame.width)
+        } else {
+            editorFrame.origin.x = screenFrame.minX
+        }
+        if editorFrame.height <= screenFrame.height {
+            editorFrame.origin.y = min(max(editorFrame.origin.y, screenFrame.minY), screenFrame.maxY - editorFrame.height)
+        } else {
+            editorFrame.origin.y = screenFrame.minY
+        }
+        window.contentAspectRatio = NSSize(width: 0, height: 0)
+        window.setFrame(editorFrame, display: true)
+
+        let container = NSView(frame: NSRect(origin: .zero, size: editorFrame.size))
+        container.autoresizingMask = [.width, .height]
+
+        let imageOriginY = placeToolbarBelow ? chromeHeight : 0
         let view = PinEditorView()
-        view.frame = NSRect(origin: .zero, size: window.contentView?.bounds.size ?? window.frame.size)
-        view.autoresizingMask = [.width, .height]
+        view.frame = NSRect(
+            x: imageFrame.minX - editorFrame.minX,
+            y: imageOriginY,
+            width: imageFrame.width,
+            height: imageFrame.height)
+        view.autoresizingMask = placeToolbarBelow ? [.minYMargin] : [.maxYMargin]
         view.screenshotImage = currentImage
         view.captureSourceImage = currentImage
         view.overlayDelegate = self
+        view.chromeParentView = container
+        view.toolbarPlacement = placeToolbarBelow ? .belowImage : .aboveImage
         view.applySelection(NSRect(origin: .zero, size: currentImage.size))
 
-        window.contentView = view
+        container.addSubview(view)
+        window.contentView = container
         editorView = view
         window.makeFirstResponder(view)
     }
@@ -216,9 +305,12 @@ class PinWindowController {
             currentImage = image
         }
 
+        let restoreFrame = preEditFrame ?? NSRect(origin: window.frame.origin, size: initialWindowSize)
+        preEditFrame = nil
+        window.setFrame(restoreFrame, display: true)
         let view = makePinView(
             image: currentImage,
-            frame: NSRect(origin: .zero, size: window.contentView?.bounds.size ?? window.frame.size))
+            frame: NSRect(origin: .zero, size: restoreFrame.size))
         window.contentView = view
         self.editorView = nil
         self.pinView = view
@@ -571,6 +663,13 @@ private class PinView: NSView {
 // MARK: - Inline Pin Editor
 
 private class PinEditorView: OverlayView {
+    enum ToolbarPlacement {
+        case belowImage
+        case aboveImage
+    }
+
+    var toolbarPlacement: ToolbarPlacement = .belowImage
+
     override var isEditorMode: Bool { true }
     override var shouldShowRightToolbar: Bool { false }
     override func shouldAllowNewSelection() -> Bool { false }
@@ -611,6 +710,47 @@ private class PinEditorView: OverlayView {
     }
 
     override var captureDrawRect: NSRect { selectionRect }
+
+    override func positionEditorToolbarStrips(
+        bottomStrip: ToolbarStripView,
+        rightStrip: ToolbarStripView,
+        bottomSize: NSSize,
+        rightSize: NSSize,
+        containerBounds: NSRect
+    ) {
+        let imageFrame = frame
+        let x = max(4, min(imageFrame.midX - bottomSize.width / 2, containerBounds.maxX - bottomSize.width - 4))
+        let y: CGFloat
+        switch toolbarPlacement {
+        case .belowImage:
+            y = 20
+        case .aboveImage:
+            y = min(containerBounds.maxY - bottomSize.height - 4, imageFrame.maxY + 14)
+        }
+        bottomStrip.frame.origin = NSPoint(x: x, y: y)
+        bottomStrip.autoresizingMask = [.minXMargin, .maxXMargin]
+        rightStrip.frame.origin = NSPoint(x: containerBounds.maxX - rightSize.width - 20, y: containerBounds.maxY - rightSize.height - 20)
+        rightStrip.autoresizingMask = [.minXMargin, .minYMargin]
+    }
+
+    override func positionEditorOptionsRow(
+        _ row: ToolOptionsRowView,
+        rowWidth: CGFloat,
+        bottomBarRect: NSRect,
+        containerBounds: NSRect
+    ) {
+        let imageFrame = frame
+        let rowX = max(4, min(imageFrame.midX - rowWidth / 2, containerBounds.maxX - rowWidth - 4))
+        let y: CGFloat
+        switch toolbarPlacement {
+        case .belowImage:
+            y = max(4, bottomBarRect.maxY + 2)
+        case .aboveImage:
+            y = min(containerBounds.maxY - row.frame.height - 4, bottomBarRect.maxY + 2)
+        }
+        row.frame.origin = NSPoint(x: rowX, y: y)
+        row.autoresizingMask = [.minXMargin, .maxXMargin]
+    }
 
     override func keyDown(with event: NSEvent) {
         if let textView = textEditView {
