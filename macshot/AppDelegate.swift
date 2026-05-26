@@ -205,6 +205,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }()
 
     func applicationDidFinishLaunching(_ aNotification: Notification) {
+        ToolShortcutManager.prepareCaches()
+
         // Prevent multiple instances — if already running, activate the existing one and quit
         let bundleID = Bundle.main.bundleIdentifier ?? "com.sw33tlie.macshot.macshot"
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)

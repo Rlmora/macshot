@@ -84,7 +84,7 @@ enum StampEmojis {
 }
 
 /// Handles stamp (emoji/image) tool interaction.
-/// Click-to-place: creates a stamp annotation immediately on mouseDown.
+/// Click-to-place: creates a stamp preview on mouseDown and commits on mouseUp.
 final class StampToolHandler: AnnotationToolHandler {
 
     let tool: AnnotationTool = .stamp
@@ -97,7 +97,7 @@ final class StampToolHandler: AnnotationToolHandler {
         }
         guard let img = canvas.currentStampImage else { return nil }
 
-        let stampSize: CGFloat = 64
+        let stampSize = canvas.currentStampSize
         let aspect = img.size.width / max(img.size.height, 1)
         let w = aspect >= 1 ? stampSize : stampSize * aspect
         let h = aspect >= 1 ? stampSize / aspect : stampSize
@@ -109,12 +109,7 @@ final class StampToolHandler: AnnotationToolHandler {
         )
         annotation.stampImage = img
 
-        // Stamp is instant — commit immediately
-        canvas.annotations.append(annotation)
-        canvas.undoStack.append(.added(annotation))
-        canvas.redoStack.removeAll()
-        canvas.setNeedsDisplay()
-        return nil  // nil = don't set as activeAnnotation
+        return annotation
     }
 
     func update(to point: NSPoint, shiftHeld: Bool, canvas: AnnotationCanvas) {
@@ -122,6 +117,7 @@ final class StampToolHandler: AnnotationToolHandler {
     }
 
     func finish(canvas: AnnotationCanvas) {
-        // No finish behavior — stamp committed in start()
+        guard let annotation = canvas.activeAnnotation else { return }
+        commitAnnotation(annotation, canvas: canvas)
     }
 }

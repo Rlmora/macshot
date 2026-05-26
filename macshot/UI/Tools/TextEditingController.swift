@@ -264,7 +264,7 @@ class TextEditingController {
             viewFrame = NSRect(origin: canvas.canvasToView(existingFrame.origin), size: existingFrame.size)
         } else {
             let height = max(28, fontSize + 12)
-            viewFrame = NSRect(x: viewPt.x, y: viewPt.y - height, width: 200, height: height)
+            viewFrame = NSRect(x: viewPt.x, y: viewPt.y - height, width: 400, height: height)
         }
 
         let sv = NSScrollView(frame: viewFrame)

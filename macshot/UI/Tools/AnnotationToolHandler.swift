@@ -29,6 +29,7 @@ protocol AnnotationCanvas: AnyObject {
     // Stamp tool
     var currentStampImage: NSImage? { get set }
     var currentStampEmoji: String? { get set }
+    var currentStampSize: CGFloat { get set }
 
     /// currentColor with tool-appropriate opacity applied.
     func opacityAppliedColor(for tool: AnnotationTool) -> NSColor

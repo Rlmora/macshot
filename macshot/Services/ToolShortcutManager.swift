@@ -99,6 +99,10 @@ enum ToolShortcutManager {
 
     private static let defaultsKey = "overlayToolShortcuts"
 
+    static func prepareCaches() {
+        rebuildCaches()
+    }
+
     /// Get the key character for an action. Empty string = disabled.
     static func key(for action: Action) -> String {
         if let dict = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String],
@@ -113,59 +117,137 @@ enum ToolShortcutManager {
         var dict = (UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String]) ?? [:]
         dict[action.rawValue] = key
         UserDefaults.standard.set(dict, forKey: defaultsKey)
-        // Rebuild the lookup cache
-        _cachedLookup = nil
+        rebuildCaches()
     }
 
     /// Build a reverse lookup: character → ToolbarButtonAction.
     /// Cached and invalidated when shortcuts change.
     static func lookupAction(for character: String) -> ToolbarButtonAction? {
-        if _cachedLookup == nil { rebuildCache() }
+        if _cachedLookup == nil { rebuildCaches() }
         return _cachedLookup?[character]
     }
 
-    private static var _cachedLookup: [String: ToolbarButtonAction]?
+    /// Display string for the shortcut bound to a toolbar action. Nil means no shortcut is assigned.
+    static func displayString(forToolbarAction toolbarAction: ToolbarButtonAction) -> String? {
+        if _cachedToolbarShortcutDisplay == nil { rebuildCaches() }
 
-    private static func rebuildCache() {
+        let singleKey = toolbarAction.shortcutCacheKey.flatMap { _cachedToolbarShortcutDisplay?[$0] }
+        let standardKey = standardShortcutDisplay(for: toolbarAction)
+        switch (singleKey, standardKey) {
+        case let (single?, standard?) where single != standard:
+            return "\(single) / \(standard)"
+        case let (single?, _):
+            return single
+        case let (nil, standard?):
+            return standard
+        default:
+            return nil
+        }
+    }
+
+    private static var _cachedLookup: [String: ToolbarButtonAction]?
+    private static var _cachedToolbarShortcutDisplay: [String: String]?
+
+    private static func rebuildCaches() {
+        let shortcuts = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String]
+        rebuildLookupCache(shortcuts: shortcuts)
+        rebuildToolbarShortcutDisplayCache(shortcuts: shortcuts)
+    }
+
+    private static func configuredKey(for action: Action, shortcuts: [String: String]?) -> String {
+        shortcuts?[action.rawValue] ?? action.defaultKey
+    }
+
+    private static func rebuildLookupCache(shortcuts: [String: String]?) {
         var lookup: [String: ToolbarButtonAction] = [:]
         for action in Action.allCases {
-            let k = key(for: action)
+            let k = configuredKey(for: action, shortcuts: shortcuts)
             guard !k.isEmpty else { continue }
-            switch action {
-            case .pencil: lookup[k] = .tool(.pencil)
-            case .arrow: lookup[k] = .tool(.arrow)
-            case .line: lookup[k] = .tool(.line)
-            case .rectangle: lookup[k] = .tool(.rectangle)
-            case .ellipse: lookup[k] = .tool(.ellipse)
-            case .marker: lookup[k] = .tool(.marker)
-            case .text: lookup[k] = .tool(.text)
-            case .number: lookup[k] = .tool(.number)
-            case .censor: lookup[k] = .tool(.pixelate)
-            case .colorSampler: lookup[k] = .tool(.colorSampler)
-            case .stamp: lookup[k] = .tool(.stamp)
-            case .measure: lookup[k] = .tool(.measure)
-            case .loupe: lookup[k] = .tool(.loupe)
-            case .openInEditor: lookup[k] = .detach
-            case .pin: lookup[k] = .pin
-            case .upload: lookup[k] = .upload
-            case .copy: lookup[k] = .copy
-            case .save: lookup[k] = .save
-            case .ocr: lookup[k] = .ocr
-            case .scrollCapture: lookup[k] = .scrollCapture
-            case .beautify: lookup[k] = .beautify
-            case .invertColors: lookup[k] = .invertColors
-            case .removeBackground: lookup[k] = .removeBackground
-            case .translate: lookup[k] = .translate
-            case .undo: lookup[k] = .undo
-            case .redo: lookup[k] = .redo
-            }
+            lookup[k] = action.toolbarAction
         }
         _cachedLookup = lookup
+    }
+
+    private static func rebuildToolbarShortcutDisplayCache(shortcuts: [String: String]?) {
+        var display: [String: String] = [:]
+        for action in Action.allCases {
+            let k = configuredKey(for: action, shortcuts: shortcuts)
+            guard !k.isEmpty, let cacheKey = action.toolbarAction.shortcutCacheKey else { continue }
+            display[cacheKey] = k.uppercased()
+        }
+        _cachedToolbarShortcutDisplay = display
+    }
+
+    private static func standardShortcutDisplay(for toolbarAction: ToolbarButtonAction) -> String? {
+        switch toolbarAction {
+        case .copy: return "⌘C"
+        case .save: return "⌘S"
+        case .undo: return "⌘Z"
+        case .redo: return "⇧⌘Z"
+        case .cancel: return "Esc"
+        default: return nil
+        }
     }
 
     /// Display string for a key (for UI).
     static func displayString(for action: Action) -> String {
         let k = key(for: action)
         return k.isEmpty ? L("None") : k.uppercased()
+    }
+}
+
+private extension ToolShortcutManager.Action {
+    var toolbarAction: ToolbarButtonAction {
+        switch self {
+        case .pencil: return .tool(.pencil)
+        case .arrow: return .tool(.arrow)
+        case .line: return .tool(.line)
+        case .rectangle: return .tool(.rectangle)
+        case .ellipse: return .tool(.ellipse)
+        case .marker: return .tool(.marker)
+        case .text: return .tool(.text)
+        case .number: return .tool(.number)
+        case .censor: return .tool(.pixelate)
+        case .colorSampler: return .tool(.colorSampler)
+        case .stamp: return .tool(.stamp)
+        case .measure: return .tool(.measure)
+        case .loupe: return .tool(.loupe)
+        case .openInEditor: return .detach
+        case .pin: return .pin
+        case .upload: return .upload
+        case .copy: return .copy
+        case .save: return .save
+        case .ocr: return .ocr
+        case .scrollCapture: return .scrollCapture
+        case .beautify: return .beautify
+        case .invertColors: return .invertColors
+        case .removeBackground: return .removeBackground
+        case .translate: return .translate
+        case .undo: return .undo
+        case .redo: return .redo
+        }
+    }
+}
+
+private extension ToolbarButtonAction {
+    var shortcutCacheKey: String? {
+        switch self {
+        case .tool(let tool): return "tool:\(tool.rawValue)"
+        case .detach: return "detach"
+        case .pin: return "pin"
+        case .upload: return "upload"
+        case .copy: return "copy"
+        case .save: return "save"
+        case .ocr: return "ocr"
+        case .scrollCapture: return "scrollCapture"
+        case .beautify: return "beautify"
+        case .invertColors: return "invertColors"
+        case .removeBackground: return "removeBackground"
+        case .translate: return "translate"
+        case .undo: return "undo"
+        case .redo: return "redo"
+        default:
+            return nil
+        }
     }
 }

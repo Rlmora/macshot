@@ -100,6 +100,7 @@ class PinWindowController {
         let view = PinView(image: image)
         view.frame = frame
         view.autoresizingMask = [.width, .height]
+        view.showsBorder = window?.hasShadow ?? true
         view.onClose = { [weak self] in self?.close() }
         view.onEdit = { [weak self] in self?.toggleEditing() }
         view.onCopy = { [weak self] in self?.copyCurrentImage() }
@@ -227,7 +228,9 @@ class PinWindowController {
     }
 
     private func toggleShadow() {
-        window?.hasShadow.toggle()
+        let enabled = !(window?.hasShadow ?? true)
+        window?.hasShadow = enabled
+        pinView?.showsBorder = enabled
     }
 
     private func copyCurrentImage() {
@@ -362,6 +365,9 @@ private class PinView: NSView {
     var onToggleShadow: (() -> Void)?
     var onZoom: ((CGFloat, NSPoint) -> Void)?
     var onResetZoom: (() -> Void)?
+    var showsBorder: Bool = true {
+        didSet { needsDisplay = true }
+    }
 
     private let image: NSImage
     private var closeButton: NSButton?
@@ -484,6 +490,7 @@ private class PinView: NSView {
         path.addClip()
         image.draw(in: bounds, from: .zero, operation: .copy, fraction: 1.0)
 
+        guard showsBorder else { return }
         NSColor.white.withAlphaComponent(0.3).setStroke()
         let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6)
         border.lineWidth = 1

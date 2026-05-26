@@ -161,6 +161,10 @@ class OverlayView: NSView {
     private var lastDragPoint: NSPoint?  // for shift constraint on flagsChanged
     private var spaceRepositioning: Bool = false  // Space held during drag to reposition
     private var spaceRepositionLast: NSPoint = .zero  // last mouse position when space reposition started
+    private var toolScrollAccumulator: CGFloat = 0
+
+    private var stampPlacementTimer: Timer?
+    private var stampPlacementRotating: Bool = false
 
     /// Snapshot of `undoStack.count` taken at the start of a fresh click in `selected` state.
     /// Used by the "double-click to copy" feature to rewind annotations that the first click
@@ -247,6 +251,10 @@ class OverlayView: NSView {
     var currentMarkerSize: CGFloat = {
         let saved = UserDefaults.standard.object(forKey: "markerStrokeWidth") as? Double
         return saved != nil ? CGFloat(saved!) : 3.0
+    }()
+    var currentStampSize: CGFloat = {
+        let saved = UserDefaults.standard.object(forKey: "stampSize") as? Double
+        return saved != nil ? CGFloat(saved!) : 64.0
     }()
     var numberCounter: Int = 0
     var numberStartAt: Int = {
@@ -1559,6 +1567,7 @@ class OverlayView: NSView {
             // Draw selection highlight for selected annotations
             // Suppressed during recording so annotations are purely visual overlays.
             if !isRecording {
+                drawPendingStampPlacementControlsIfNeeded()
                 for selected in selectedAnnotations {
                     // Only draw full controls (handles, buttons) for single selection
                     drawAnnotationControls(for: selected, fullControls: selectedAnnotations.count == 1)
@@ -1611,9 +1620,10 @@ class OverlayView: NSView {
                 }
 
                 // Re-draw annotation controls on top of the beautify preview so they stay visible.
-                if !isRecording && !selectedAnnotations.isEmpty {
+                if !isRecording && (stampPlacementRotating || !selectedAnnotations.isEmpty) {
                     context.saveGraphicsState()
                     applyCanvasTransform(to: context)
+                    drawPendingStampPlacementControlsIfNeeded()
                     for selected in selectedAnnotations {
                         drawAnnotationControls(for: selected, fullControls: selectedAnnotations.count == 1)
                     }
@@ -1683,9 +1693,10 @@ class OverlayView: NSView {
                 context.restoreGraphicsState()
 
                 // Re-draw overlays on top of effects preview
-                if !selectedAnnotations.isEmpty {
+                if stampPlacementRotating || !selectedAnnotations.isEmpty {
                     context.saveGraphicsState()
                     applyCanvasTransform(to: context)
+                    drawPendingStampPlacementControlsIfNeeded()
                     for selected in selectedAnnotations {
                         drawAnnotationControls(for: selected, fullControls: selectedAnnotations.count == 1)
                     }
@@ -1830,7 +1841,7 @@ class OverlayView: NSView {
             if let previewPt = stampPreviewPoint, let img = currentStampImage,
                 currentTool == .stamp, !isRecording
             {
-                let stampSize: CGFloat = 64
+                let stampSize = currentStampSize
                 let aspect = img.size.width / max(img.size.height, 1)
                 let w = aspect >= 1 ? stampSize : stampSize * aspect
                 let h = aspect >= 1 ? stampSize / aspect : stampSize
@@ -4753,6 +4764,24 @@ class OverlayView: NSView {
                 }
             }
 
+            if currentTool == .select && pointIsInSelection(point) {
+                let canvasPoint = viewToCanvas(point)
+                if let selected = selectedAnnotation,
+                   handleSelectedAnnotationClick(selected, at: canvasPoint) {
+                    return
+                }
+                if annotations.reversed().contains(where: { $0.isMovable && $0.hitTest(point: canvasPoint) }) {
+                    startAnnotation(at: canvasPoint)
+                    return
+                }
+                isDraggingSelection = true
+                dragOffset = NSPoint(x: point.x - selectionRect.origin.x, y: point.y - selectionRect.origin.y)
+                selectionIsWindowSnap = false
+                snappedWindowID = nil
+                snappedWindowImage = nil
+                return
+            }
+
             // Crop tool drag (use canvas coords so it aligns with the image)
             if currentTool == .crop && pointIsInSelection(point) {
                 isCropDragging = true
@@ -4794,7 +4823,7 @@ class OverlayView: NSView {
         let point = convert(event.locationInWindow, from: nil)
 
         // Cancel long-press timer if the user moved more than 3px (they're drawing, not selecting)
-        if longPressTimer != nil {
+        if longPressTimer != nil && currentTool != .stamp {
             let dx = point.x - longPressPoint.x
             let dy = point.y - longPressPoint.y
             if dx * dx + dy * dy > 9 {
@@ -4911,17 +4940,11 @@ class OverlayView: NSView {
             // Convert to canvas space for annotation interactions (accounts for zoom)
             let canvasPoint = viewToCanvas(point)
             if isRotatingAnnotation, let annotation = selectedAnnotation {
-                let center = NSPoint(
-                    x: annotation.boundingRect.midX, y: annotation.boundingRect.midY)
-                let currentAngle = atan2(canvasPoint.x - center.x, canvasPoint.y - center.y)
-                var newRotation = rotationOriginal - (currentAngle - rotationStartAngle)
-                // Shift: snap to 45° steps
-                if NSEvent.modifierFlags.contains(.shift) {
-                    let step = CGFloat.pi / 4
-                    newRotation = (newRotation / step).rounded() * step
-                }
-                annotation.rotation = newRotation
-                needsDisplay = true
+                updateAnnotationRotation(
+                    annotation,
+                    to: canvasPoint,
+                    shiftHeld: event.modifierFlags.contains(.shift)
+                )
                 return
             }
             if isResizingAnnotation, let annotation = selectedAnnotation {
@@ -5153,6 +5176,11 @@ class OverlayView: NSView {
                 overlayDelegate?.overlayViewSelectionDidChange(selectionRect)
                 needsDisplay = true
             } else if currentAnnotation != nil {
+                if currentAnnotation?.tool == .stamp {
+                    updatePendingStampRotation(to: canvasPoint)
+                    lastDragPoint = canvasPoint
+                    return
+                }
                 if spaceRepositioning {
                     // Space held: reposition the whole shape
                     let dx = canvasPoint.x - spaceRepositionLast.x
@@ -5295,6 +5323,9 @@ class OverlayView: NSView {
                 }
                 needsDisplay = true
             } else if let annotation = currentAnnotation {
+                if annotation.tool == .stamp {
+                    finishPendingStampPlacement()
+                }
                 finishAnnotation(annotation)
             }
 
@@ -5329,6 +5360,7 @@ class OverlayView: NSView {
                 return true
             }
             // Cancel any in-progress annotation from this second click.
+            finishPendingStampPlacement()
             currentAnnotation = nil
             // Rewind the undo stack to the baseline captured on the first click,
             // popping the annotation(s) the first click finished.
@@ -5347,7 +5379,7 @@ class OverlayView: NSView {
         // knows how far to rewind. Only record when the click could plausibly create
         // an annotation (inside selection, drawing tool). Otherwise leave it nil so
         // a double-click outside still works without an unrelated baseline.
-        if pointIsInSelection(point) {
+        if pointIsInSelection(point) && currentTool != .stamp {
             doubleClickUndoBaseline = undoStack.count
         } else {
             doubleClickUndoBaseline = nil
@@ -5358,6 +5390,7 @@ class OverlayView: NSView {
     private func finishSelection() {
         if selectionRect.width > 5 || selectionRect.height > 5 {
             // Real drag — use drawn rect as-is
+            enterSelectionMoveMode()
             state = .selected
             if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
@@ -5377,12 +5410,14 @@ class OverlayView: NSView {
                     }
                 }
             }
+            enterSelectionMoveMode()
             state = .selected
             if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else {
             // Click (no drag), snap off — expand to full screen
             selectionRect = bounds
+            enterSelectionMoveMode()
             state = .selected
             if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
@@ -5458,6 +5493,7 @@ class OverlayView: NSView {
         annotations.removeAll()
         undoStack.removeAll()
         redoStack.removeAll()
+        finishPendingStampPlacement()
         currentAnnotation = nil
         selectedAnnotation = nil
         selectedAnnotations = []
@@ -5469,6 +5505,9 @@ class OverlayView: NSView {
         isResizingSelection = false
         isResizingRemoteSelection = false
         isLassoSelecting = false
+        stampPlacementTimer?.invalidate()
+        stampPlacementTimer = nil
+        stampPlacementRotating = false
         lassoRect = .zero
         autoMeasurePreview = nil
         autoMeasureKeyHeld = false
@@ -5679,10 +5718,18 @@ class OverlayView: NSView {
         let isTrackpadPhased = event.phase != [] || event.momentumPhase != []
         let isCommandScroll = event.modifierFlags.contains(.command)
 
+        if isCommandScroll {
+            let cursor = convert(event.locationInWindow, from: nil)
+            let delta = event.deltaY
+            let factor: CGFloat = 0.1
+            setZoom(zoomLevel + delta * factor, cursorView: cursor)
+            return
+        }
+
         // Phase-based (trackpad) scroll without Cmd → pan only, never zoom
         // Suppress panning while actively drawing to prevent pan+draw conflict (Apple Pencil / Sidecar)
-        if isTrackpadPhased && !isCommandScroll && currentAnnotation != nil { return }
-        if isTrackpadPhased && !isCommandScroll {
+        if isTrackpadPhased && currentAnnotation != nil { return }
+        if isTrackpadPhased {
             // Allow panning when zoomed OR when the image exceeds the view (tall/wide images in editor)
             let imageExceedsView =
                 canPanAtOneX()
@@ -5698,12 +5745,7 @@ class OverlayView: NSView {
             return
         }
 
-        // Cmd+scroll or plain mouse wheel (non-trackpad) → zoom
-        guard isCommandScroll || !isTrackpadPhased else { return }
-        let cursor = convert(event.locationInWindow, from: nil)
-        let delta = event.deltaY
-        let factor: CGFloat = 0.1
-        setZoom(zoomLevel + delta * factor, cursorView: cursor)
+        adjustCurrentToolSize(by: adjustedScrollStep(from: event))
     }
 
     override func magnify(with event: NSEvent) {
@@ -5777,13 +5819,21 @@ class OverlayView: NSView {
                 // For non-tool actions, compare string representation
                 return "\(bv.action)" == "\(action)"
             }
-            hoveredTooltip = btn?.tooltipText
+            hoveredTooltip = tooltipText(for: btn)
             hoveredTooltipButtonView = btn
         } else {
             hoveredTooltip = nil
             hoveredTooltipButtonView = nil
         }
         needsDisplay = true
+    }
+
+    private func tooltipText(for button: ToolbarButtonView?) -> String? {
+        guard let button else { return nil }
+        let tooltip = button.tooltipText
+        guard let shortcut = ToolShortcutManager.displayString(forToolbarAction: button.action)
+        else { return tooltip }
+        return "\(tooltip)  \(shortcut)"
     }
 
     private func drawHoveredTooltip() {
@@ -6265,7 +6315,7 @@ class OverlayView: NSView {
                 if event.type == .leftMouseUp { break }
             }
             // Restore original tooltip and reset button pressed state
-            hoveredTooltip = hoveredTooltipButtonView?.tooltipText
+            hoveredTooltip = tooltipText(for: hoveredTooltipButtonView)
             if let moveBtn = rightStripView?.buttonViews.first(where: { if case .moveSelection = $0.action { return true }; return false }) {
                 moveBtn.isPressed = false
                 moveBtn.needsDisplay = true
@@ -6445,6 +6495,149 @@ class OverlayView: NSView {
             cachedCompositedImage = nil
             needsDisplay = true
         }
+    }
+
+    private func enterSelectionMoveMode() {
+        guard !isEditorMode else { return }
+        currentTool = .select
+        selectedAnnotations = []
+        showBeautifyInOptionsRow = false
+        stampPreviewPoint = nil
+        if showToolbars {
+            rebuildToolbarLayout()
+        }
+    }
+
+    private func adjustedScrollStep(from event: NSEvent) -> CGFloat {
+        let raw = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.deltaY
+        guard raw != 0 else { return 0 }
+        if event.hasPreciseScrollingDeltas {
+            toolScrollAccumulator += raw
+            let threshold: CGFloat = 8
+            guard abs(toolScrollAccumulator) >= threshold else { return 0 }
+            let steps = (toolScrollAccumulator / threshold).rounded(.towardZero)
+            toolScrollAccumulator -= steps * threshold
+            return steps
+        }
+        return raw > 0 ? 1 : -1
+    }
+
+    private func startStampPlacementTimer(for annotation: Annotation, at point: NSPoint) {
+        stampPlacementTimer?.invalidate()
+        stampPlacementRotating = false
+        stampPlacementTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self, weak annotation] _ in
+            guard let self, let annotation, self.currentAnnotation === annotation else { return }
+            self.stampPlacementRotating = true
+            self.beginAnnotationRotation(annotation, at: self.lastDragPoint ?? point)
+            self.stampPlacementTimer = nil
+            NSCursor.closedHand.set()
+            self.needsDisplay = true
+        }
+    }
+
+    private func beginAnnotationRotation(_ annotation: Annotation, at point: NSPoint) {
+        let center = NSPoint(x: annotation.boundingRect.midX, y: annotation.boundingRect.midY)
+        rotationStartAngle = atan2(point.x - center.x, point.y - center.y)
+        rotationOriginal = annotation.rotation
+    }
+
+    private func updateAnnotationRotation(_ annotation: Annotation, to point: NSPoint, shiftHeld: Bool) {
+        let center = NSPoint(x: annotation.boundingRect.midX, y: annotation.boundingRect.midY)
+        let currentAngle = atan2(point.x - center.x, point.y - center.y)
+        var newRotation = rotationOriginal - (currentAngle - rotationStartAngle)
+        if shiftHeld {
+            let step = CGFloat.pi / 4
+            newRotation = (newRotation / step).rounded() * step
+        }
+        annotation.rotation = newRotation
+        needsDisplay = true
+    }
+
+    private func updatePendingStampRotation(to point: NSPoint) {
+        guard stampPlacementRotating,
+              let annotation = currentAnnotation,
+              annotation.tool == .stamp else { return }
+        updateAnnotationRotation(
+            annotation,
+            to: point,
+            shiftHeld: NSEvent.modifierFlags.contains(.shift)
+        )
+    }
+
+    private func finishPendingStampPlacement() {
+        stampPlacementTimer?.invalidate()
+        stampPlacementTimer = nil
+        stampPlacementRotating = false
+    }
+
+    private func drawPendingStampPlacementControlsIfNeeded() {
+        guard stampPlacementRotating,
+              let annotation = currentAnnotation,
+              annotation.tool == .stamp else { return }
+        drawAnnotationControls(for: annotation, fullControls: true)
+    }
+
+    private func resizeAnnotation(_ annotation: Annotation, by step: CGFloat) {
+        switch annotation.tool {
+        case .text:
+            annotation.fontSize = max(8, min(200, annotation.fontSize + step))
+            annotation.reRenderTextImage()
+            textEditor.restoreState(from: annotation)
+        case .stamp:
+            let rect = annotation.boundingRect
+            let aspect = rect.width / max(rect.height, 1)
+            let currentSize = max(rect.width, rect.height)
+            let newSize = max(16, min(320, currentSize + step))
+            let newW = aspect >= 1 ? newSize : newSize * aspect
+            let newH = aspect >= 1 ? newSize / aspect : newSize
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            annotation.startPoint = NSPoint(x: center.x - newW / 2, y: center.y - newH / 2)
+            annotation.endPoint = NSPoint(x: center.x + newW / 2, y: center.y + newH / 2)
+        case .number:
+            annotation.strokeWidth = max(1, min(30, annotation.strokeWidth + step))
+            currentNumberSize = annotation.strokeWidth
+            UserDefaults.standard.set(Double(currentNumberSize), forKey: "numberStrokeWidth")
+        case .loupe:
+            annotation.strokeWidth = max(40, min(320, annotation.strokeWidth + step))
+            currentLoupeSize = annotation.strokeWidth
+            UserDefaults.standard.set(Double(currentLoupeSize), forKey: "loupeSize")
+            annotation.bakeLoupe()
+        default:
+            annotation.strokeWidth = max(1, min(30, annotation.strokeWidth + step))
+            setActiveStrokeWidth(annotation.strokeWidth, for: annotation.tool)
+        }
+        cachedCompositedImage = nil
+        toolOptionsRowView?.rebuild(forAnnotation: annotation)
+        needsDisplay = true
+    }
+
+    private func adjustCurrentToolSize(by step: CGFloat) {
+        guard step != 0 else { return }
+        if let annotation = selectedAnnotation {
+            resizeAnnotation(annotation, by: step)
+            return
+        }
+
+        switch currentTool {
+        case .select, .colorSampler, .crop, .translateOverlay:
+            return
+        case .text:
+            textEditor.fontSize = max(8, min(200, textEditor.fontSize + step))
+            UserDefaults.standard.set(Double(textEditor.fontSize), forKey: "textFontSize")
+            textEditor.applyFontSizeChange()
+            textEditor.resizeToFit()
+            applyTextFormattingToSelectedAnnotations()
+        case .stamp:
+            currentStampSize = max(16, min(320, currentStampSize + step))
+            UserDefaults.standard.set(Double(currentStampSize), forKey: "stampSize")
+        default:
+            let current = activeStrokeWidthForTool(currentTool)
+            let minValue: CGFloat = currentTool == .loupe ? 40 : 1
+            let maxValue: CGFloat = currentTool == .loupe ? 320 : 30
+            setActiveStrokeWidth(max(minValue, min(maxValue, current + step)), for: currentTool)
+        }
+        toolOptionsRowView?.rebuild(for: currentTool)
+        needsDisplay = true
     }
 
     /// Apply current glyph-stroke state to the live NSTextView (if open).
@@ -6631,6 +6824,9 @@ class OverlayView: NSView {
                     annotation.outlineColor = ToolOptionsRowView.savedOutlineColor
                 }
                 currentAnnotation = annotation
+                if currentTool == .stamp {
+                    startStampPlacementTimer(for: annotation, at: point)
+                }
                 needsDisplay = true
             }
             return
@@ -6759,9 +6955,7 @@ class OverlayView: NSView {
         {
             isRotatingAnnotation = true
             cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
-            let center = NSPoint(x: selected.boundingRect.midX, y: selected.boundingRect.midY)
-            rotationStartAngle = atan2(point.x - center.x, point.y - center.y)
-            rotationOriginal = selected.rotation
+            beginAnnotationRotation(selected, at: point)
             NSCursor.closedHand.set()
             needsDisplay = true
             return true
@@ -7045,13 +7239,54 @@ class OverlayView: NSView {
         overlayDelegate?.overlayViewDidRequestSave()
     }
 
+    private func shouldConfirmCopyAndExitFromShortcut() -> Bool {
+        state == .selected && !isInsideScrollView
+    }
+
+    private func confirmCopyAndExitFromShortcut() {
+        commitTextFieldIfNeeded()
+        commitSizeInputIfNeeded()
+        commitZoomInputIfNeeded()
+        toolOptionsRowView?.clearEditingAnnotation()
+        PopoverHelper.dismiss()
+        colorWheel.dismiss()
+        isDraggingAnnotation = false
+        didMoveAnnotation = false
+        isResizingAnnotation = false
+        isRotatingAnnotation = false
+        annotationResizeHandle = .none
+        isDraggingSelection = false
+        isResizingSelection = false
+        resizeHandle = .none
+        isLassoSelecting = false
+        lassoRect = .zero
+        snapGuideX = nil
+        snapGuideY = nil
+        if let annotation = currentAnnotation {
+            if annotation.tool == .stamp {
+                finishPendingStampPlacement()
+            }
+            finishAnnotation(annotation)
+        }
+        cachedAnnotationLayerExcludingSelected = nil
+        cachedAnnotationLayer = nil
+        selectedAnnotations = []
+        cachedCompositedImage = nil
+        needsDisplay = true
+        overlayDelegate?.overlayViewDidConfirm()
+    }
+
     // MARK: - Keyboard
 
     override func flagsChanged(with event: NSEvent) {
         // Re-apply shift constraint immediately when Shift is pressed/released during annotation drag
-        if currentAnnotation != nil, let lastPoint = lastDragPoint {
+        if let annotation = currentAnnotation, let lastPoint = lastDragPoint {
             let shiftHeld = event.modifierFlags.contains(.shift)
-            updateAnnotation(at: lastPoint, shiftHeld: shiftHeld)
+            if annotation.tool == .stamp {
+                updatePendingStampRotation(to: lastPoint)
+            } else {
+                updateAnnotation(at: lastPoint, shiftHeld: shiftHeld)
+            }
             needsDisplay = true
         }
     }
@@ -7071,6 +7306,10 @@ class OverlayView: NSView {
         // so shortcuts work regardless of keyboard layout (e.g. Russian, Arabic).
         if event.modifierFlags.contains(.command) {
             let key = event.keyCode
+            if key == 8, shouldConfirmCopyAndExitFromShortcut() {
+                confirmCopyAndExitFromShortcut()
+                return true
+            }
             // Text editing: forward to NSTextView (only when text is actively selected)
             if let tv = textEditView {
                 switch key {
@@ -7183,7 +7422,11 @@ class OverlayView: NSView {
                 overlayDelegate?.overlayViewDidRequestStopScrollCapture()
                 return
             }
-            if colorWheel.isVisible && colorWheel.isSticky {
+            if let annotation = currentAnnotation, annotation.tool == .stamp {
+                finishPendingStampPlacement()
+                currentAnnotation = nil
+                needsDisplay = true
+            } else if colorWheel.isVisible && colorWheel.isSticky {
                 colorWheel.dismiss()
                 needsDisplay = true
             } else if textEditView != nil {
@@ -7760,6 +8003,7 @@ class OverlayView: NSView {
     func applySelection(_ rect: NSRect) {
         selectionRect = rect
         selectionStart = rect.origin
+        enterSelectionMoveMode()
         state = .selected
         showToolbars = true
         needsDisplay = true
@@ -7768,6 +8012,7 @@ class OverlayView: NSView {
     func applyFullScreenSelection() {
         selectionRect = bounds
         selectionStart = bounds.origin
+        enterSelectionMoveMode()
         state = .selected
         showToolbars = true
         scheduleBarcodeDetection()
