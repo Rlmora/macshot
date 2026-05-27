@@ -1781,7 +1781,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     @objc private func pinImageFromClipboard() {
         if pinActiveOverlaySelection() { return }
-        guard let image = imageFromClipboard() else { showNoClipboardImageAlert(); return }
+        guard let image = pinImageFromClipboardContents() else { showNoClipboardImageAlert(); return }
         showPin(image: image)
     }
 
@@ -1797,6 +1797,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         let pasteboard = NSPasteboard.general
         if let image = NSImage(pasteboard: pasteboard), isUsableImage(image) {
             return image
+        }
+        let imageTypes: [NSPasteboard.PasteboardType] = [
+            .png,
+            .tiff,
+            NSPasteboard.PasteboardType("public.jpeg"),
+            NSPasteboard.PasteboardType("public.heic"),
+            NSPasteboard.PasteboardType("com.compuserve.gif"),
+        ]
+        for item in pasteboard.pasteboardItems ?? [] {
+            for type in imageTypes where item.availableType(from: [type]) != nil {
+                guard let data = item.data(forType: type) else { continue }
+                if let image = NSImage(data: data), isUsableImage(image) {
+                    return image
+                }
+            }
         }
         guard let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) else {
             return nil
@@ -1817,6 +1832,158 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             }
         }
         return nil
+    }
+
+    private func pinImageFromClipboardContents() -> NSImage? {
+        if let image = imageFromClipboard() {
+            return image
+        }
+        guard let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty else {
+            return nil
+        }
+        if let color = parseClipboardColor(text) {
+            return renderClipboardColorCard(color: color, label: text)
+        }
+        return renderClipboardTextCard(text)
+    }
+
+    private func parseClipboardColor(_ text: String) -> NSColor? {
+        let s = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hex = s.hasPrefix("#") ? String(s.dropFirst()) : (s.lowercased().hasPrefix("0x") ? String(s.dropFirst(2)) : nil)
+        if let hex, [3, 6, 8].contains(hex.count), let value = UInt64(hex, radix: 16) {
+            switch hex.count {
+            case 3:
+                let r = CGFloat((value >> 8) & 0xF) / 15
+                let g = CGFloat((value >> 4) & 0xF) / 15
+                let b = CGFloat(value & 0xF) / 15
+                return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+            case 6:
+                let r = CGFloat((value >> 16) & 0xFF) / 255
+                let g = CGFloat((value >> 8) & 0xFF) / 255
+                let b = CGFloat(value & 0xFF) / 255
+                return NSColor(srgbRed: r, green: g, blue: b, alpha: 1)
+            case 8:
+                let r = CGFloat((value >> 24) & 0xFF) / 255
+                let g = CGFloat((value >> 16) & 0xFF) / 255
+                let b = CGFloat((value >> 8) & 0xFF) / 255
+                let a = CGFloat(value & 0xFF) / 255
+                return NSColor(srgbRed: r, green: g, blue: b, alpha: a)
+            default:
+                break
+            }
+        }
+
+        let lower = s.lowercased()
+        guard lower.hasPrefix("rgb(") || lower.hasPrefix("rgba("),
+              let open = lower.firstIndex(of: "("),
+              let close = lower.lastIndex(of: ")"),
+              open < close else {
+            return nil
+        }
+        let values = lower[lower.index(after: open)..<close]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard values.count == 3 || values.count == 4,
+              let r = parseColorChannel(values[0]),
+              let g = parseColorChannel(values[1]),
+              let b = parseColorChannel(values[2]) else {
+            return nil
+        }
+        let a = values.count == 4 ? (parseAlphaChannel(values[3]) ?? 1) : 1
+        return NSColor(srgbRed: r, green: g, blue: b, alpha: a)
+    }
+
+    private func parseColorChannel(_ value: String) -> CGFloat? {
+        if value.hasSuffix("%"), let percent = Double(value.dropLast()) {
+            return CGFloat(max(0, min(100, percent)) / 100)
+        }
+        guard let number = Double(value) else { return nil }
+        return CGFloat(max(0, min(255, number)) / 255)
+    }
+
+    private func parseAlphaChannel(_ value: String) -> CGFloat? {
+        if value.hasSuffix("%"), let percent = Double(value.dropLast()) {
+            return CGFloat(max(0, min(100, percent)) / 100)
+        }
+        guard let number = Double(value) else { return nil }
+        return CGFloat(max(0, min(1, number)))
+    }
+
+    private func renderClipboardColorCard(color: NSColor, label: String) -> NSImage? {
+        let normalized = color.usingColorSpace(.sRGB) ?? color
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 1
+        normalized.getRed(&r, green: &g, blue: &b, alpha: &a)
+        let hex = String(format: "#%02X%02X%02X", Int(round(r * 255)), Int(round(g * 255)), Int(round(b * 255)))
+        let alphaText = a < 0.999 ? String(format: "  %.0f%%", a * 100) : ""
+        let title = "\(hex)\(alphaText)"
+        let subtitle = label == title ? "" : label
+        let size = NSSize(width: 360, height: subtitle.isEmpty ? 180 : 212)
+        return drawImage(size: size) { rect in
+            NSColor.windowBackgroundColor.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 12, yRadius: 12).fill()
+            let swatchRect = NSRect(x: 24, y: rect.height - 124, width: rect.width - 48, height: 84)
+            color.setFill()
+            NSBezierPath(roundedRect: swatchRect, xRadius: 10, yRadius: 10).fill()
+            NSColor.black.withAlphaComponent(0.14).setStroke()
+            let border = NSBezierPath(roundedRect: swatchRect, xRadius: 10, yRadius: 10)
+            border.lineWidth = 1
+            border.stroke()
+
+            drawString(title, in: NSRect(x: 24, y: 46, width: rect.width - 48, height: 28),
+                       font: .monospacedSystemFont(ofSize: 22, weight: .semibold),
+                       color: .labelColor)
+            if !subtitle.isEmpty {
+                drawString(subtitle, in: NSRect(x: 24, y: 22, width: rect.width - 48, height: 20),
+                           font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
+            }
+        }
+    }
+
+    private func renderClipboardTextCard(_ text: String) -> NSImage? {
+        let maxCharacters = 5000
+        let clipped = text.count > maxCharacters ? String(text.prefix(maxCharacters)) + "\n..." : text
+        let font = NSFont.systemFont(ofSize: 16)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph,
+        ]
+        let attributed = NSAttributedString(string: clipped, attributes: attrs)
+        let maxTextWidth: CGFloat = 720
+        let textBounds = attributed.boundingRect(
+            with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading])
+        let textWidth = min(maxTextWidth, max(240, ceil(textBounds.width)))
+        let textHeight = min(900, max(42, ceil(textBounds.height)))
+        let padding: CGFloat = 24
+        let size = NSSize(width: textWidth + padding * 2, height: textHeight + padding * 2)
+        return drawImage(size: size) { rect in
+            NSColor.windowBackgroundColor.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
+            let textRect = NSRect(x: padding, y: padding, width: textWidth, height: textHeight)
+            attributed.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
+        }
+    }
+
+    private func drawImage(size: NSSize, drawing: (NSRect) -> Void) -> NSImage? {
+        guard size.width > 0, size.height > 0 else { return nil }
+        let image = NSImage(size: size)
+        image.lockFocus()
+        drawing(NSRect(origin: .zero, size: size))
+        image.unlockFocus()
+        return isUsableImage(image) ? image : nil
+    }
+
+    private func drawString(_ text: String, in rect: NSRect, font: NSFont, color: NSColor) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+        ]
+        (text as NSString).draw(in: rect, withAttributes: attrs)
     }
 
     private func isUsableImage(_ image: NSImage) -> Bool {

@@ -341,8 +341,8 @@
 "A free, open-source screenshot & screen recording tool for macOS.\nFully native — built with Swift and AppKit." = "A free, open-source screenshot & screen recording tool for macOS.\nFully native — built with Swift and AppKit.";
 
 /* Alerts */
-"No Image on Clipboard" = "No Image on Clipboard";
-"Copy an image to the clipboard first, then try again." = "Copy an image to the clipboard first, then try again.";
+"No Image on Clipboard" = "No Pasteable Content on Clipboard";
+"Copy an image to the clipboard first, then try again." = "Copy an image or text to the clipboard first, then try again.";
 "OK" = "OK";
 "Accessibility Access Required" = "Accessibility Access Required";
 "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again." = "macshot needs Accessibility permission to auto-scroll other apps. Please grant access in System Settings, then try again.";
