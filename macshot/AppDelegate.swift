@@ -1684,13 +1684,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         showPin(image: image)
     }
 
-    func showPin(image: NSImage, sourceRect: NSRect? = nil) {
-        let identity = PinWindowController.identity(for: image)
+    func showPin(
+        image: NSImage,
+        sourceRect: NSRect? = nil,
+        textPayload: ClipboardTextRenderer.Payload? = nil,
+        identity providedIdentity: String? = nil
+    ) {
+        let identity = providedIdentity ?? PinWindowController.identity(for: image)
         if let existing = pinControllersByIdentity[identity], !existing.isClosed {
             existing.bringToFront()
             return
         }
-        let pin = PinWindowController(image: image, initialScreenRect: sourceRect)
+        let pin = PinWindowController(
+            image: image,
+            initialScreenRect: sourceRect,
+            textPayload: textPayload,
+            identity: identity
+        )
         pin.delegate = self
         pin.show()
         pinControllers.append(pin)
@@ -1781,8 +1791,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
     @objc private func pinImageFromClipboard() {
         if pinActiveOverlaySelection() { return }
-        guard let image = pinImageFromClipboardContents() else { showNoClipboardImageAlert(); return }
-        showPin(image: image)
+        guard let pin = pinImageFromClipboardContents() else { showNoClipboardImageAlert(); return }
+        showPin(image: pin.image, textPayload: pin.textPayload, identity: pin.identity)
     }
 
     private func pinActiveOverlaySelection() -> Bool {
@@ -1834,19 +1844,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         return nil
     }
 
-    private func pinImageFromClipboardContents() -> NSImage? {
+    private func pinImageFromClipboardContents() -> (
+        image: NSImage,
+        textPayload: ClipboardTextRenderer.Payload?,
+        identity: String?
+    )? {
         if let image = imageFromClipboard() {
-            return image
+            return (image, nil, nil)
         }
-        guard let text = NSPasteboard.general.string(forType: .string)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else {
+        guard let rawText = NSPasteboard.general.string(forType: .string),
+              let text = ClipboardTextRenderer.clippedNonEmptyText(from: rawText) else {
             return nil
         }
         if let color = parseClipboardColor(text) {
-            return renderClipboardColorCard(color: color, label: text)
+            guard let image = renderClipboardColorCard(color: color, label: text) else { return nil }
+            return (image, nil, nil)
         }
-        return renderClipboardTextCard(text)
+        let payload = ClipboardTextRenderer.makePayload(forClippedText: text)
+        guard let image = ClipboardTextRenderer.render(payload) else { return nil }
+        return (image, payload.isMarkdownCandidate ? payload : nil, payload.identity)
     }
 
     private func parseClipboardColor(_ text: String) -> NSColor? {
@@ -1938,34 +1954,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
                 drawString(subtitle, in: NSRect(x: 24, y: 22, width: rect.width - 48, height: 20),
                            font: .systemFont(ofSize: 13), color: .secondaryLabelColor)
             }
-        }
-    }
-
-    private func renderClipboardTextCard(_ text: String) -> NSImage? {
-        let maxCharacters = 5000
-        let clipped = text.count > maxCharacters ? String(text.prefix(maxCharacters)) + "\n..." : text
-        let font = NSFont.systemFont(ofSize: 16)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byWordWrapping
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.labelColor,
-            .paragraphStyle: paragraph,
-        ]
-        let attributed = NSAttributedString(string: clipped, attributes: attrs)
-        let maxTextWidth: CGFloat = 720
-        let textBounds = attributed.boundingRect(
-            with: NSSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading])
-        let textWidth = min(maxTextWidth, max(240, ceil(textBounds.width)))
-        let textHeight = min(900, max(42, ceil(textBounds.height)))
-        let padding: CGFloat = 24
-        let size = NSSize(width: textWidth + padding * 2, height: textHeight + padding * 2)
-        return drawImage(size: size) { rect in
-            NSColor.windowBackgroundColor.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10).fill()
-            let textRect = NSRect(x: padding, y: padding, width: textWidth, height: textHeight)
-            attributed.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading])
         }
     }
 

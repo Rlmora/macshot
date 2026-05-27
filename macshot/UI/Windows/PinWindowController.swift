@@ -21,6 +21,7 @@ class PinWindowController {
     private var preEditFrame: NSRect?
     private var ocrController: OCRResultController?
     private var currentImage: NSImage
+    private var textPayload: ClipboardTextRenderer.Payload?
     private let initialWindowSize: NSSize
     private static let minScale: CGFloat = 0.1
     private static let maxScale: CGFloat = 5.0
@@ -30,9 +31,15 @@ class PinWindowController {
     private static let toolbarSpacing: CGFloat = 2
     private static let editorHorizontalPadding: CGFloat = 8
 
-    init(image: NSImage, initialScreenRect: NSRect? = nil) {
+    init(
+        image: NSImage,
+        initialScreenRect: NSRect? = nil,
+        textPayload: ClipboardTextRenderer.Payload? = nil,
+        identity: String? = nil
+    ) {
         self.currentImage = image
-        self.pinIdentity = Self.identity(for: image)
+        self.textPayload = textPayload
+        self.pinIdentity = identity ?? Self.identity(for: image)
 
         let size = image.size
         let screen = initialScreenRect.flatMap { rect in
@@ -112,10 +119,13 @@ class PinWindowController {
         view.onCopy = { [weak self] in self?.copyCurrentImage() }
         view.onSave = { [weak self] in self?.saveCurrentImage(showPanel: true) }
         view.onToggleShadow = { [weak self] in self?.toggleShadow() }
+        view.onToggleMarkdownRendering = { [weak self] in self?.toggleMarkdownRendering() }
         view.onZoom = { [weak self] factor, viewPoint in
             self?.zoom(by: factor, around: viewPoint)
         }
         view.onResetZoom = { [weak self] in self?.resetZoom() }
+        view.canToggleMarkdownRendering = textPayload?.isMarkdownCandidate == true
+        view.markdownRenderingEnabled = textPayload?.renderMarkdownEnabled == true
         return view
     }
 
@@ -325,6 +335,31 @@ class PinWindowController {
         pinView?.showsBorder = enabled
     }
 
+    private func toggleMarkdownRendering() {
+        if editorView != nil { finishEditing() }
+        guard var payload = textPayload, payload.isMarkdownCandidate else { return }
+        payload.renderMarkdownEnabled.toggle()
+        guard let image = ClipboardTextRenderer.render(payload), let window else { return }
+
+        let oldFrame = window.frame
+        currentImage = image
+        textPayload = payload
+
+        let newHeight = oldFrame.width * image.size.height / max(image.size.width, 1)
+        let newSize = NSSize(width: oldFrame.width, height: max(1, newHeight))
+        let newOrigin = NSPoint(
+            x: oldFrame.midX - newSize.width / 2,
+            y: oldFrame.midY - newSize.height / 2
+        )
+
+        window.contentAspectRatio = image.size
+        window.setFrame(NSRect(origin: newOrigin, size: newSize), display: false)
+        let view = makePinView(image: image, frame: NSRect(origin: .zero, size: newSize))
+        window.contentView = view
+        pinView = view
+        window.makeFirstResponder(view)
+    }
+
     private func copyCurrentImage() {
         if editorView != nil { finishEditing() }
         ImageEncoder.copyToClipboard(currentImage)
@@ -455,8 +490,11 @@ private class PinView: NSView {
     var onCopy: (() -> Void)?
     var onSave: (() -> Void)?
     var onToggleShadow: (() -> Void)?
+    var onToggleMarkdownRendering: (() -> Void)?
     var onZoom: ((CGFloat, NSPoint) -> Void)?
     var onResetZoom: (() -> Void)?
+    var canToggleMarkdownRendering = false
+    var markdownRenderingEnabled = false
     var showsBorder: Bool = true {
         didSet { needsDisplay = true }
     }
@@ -595,6 +633,10 @@ private class PinView: NSView {
         menu.addItem(withTitle: L("Save As..."), action: #selector(saveImage), keyEquivalent: "s")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: L("Edit"), action: #selector(editClicked), keyEquivalent: "")
+        if canToggleMarkdownRendering {
+            let markdownItem = menu.addItem(withTitle: L("Render Markdown"), action: #selector(toggleMarkdownRendering), keyEquivalent: "")
+            markdownItem.state = markdownRenderingEnabled ? .on : .off
+        }
         let shadowItem = menu.addItem(withTitle: L("Shadow"), action: #selector(toggleShadow), keyEquivalent: "")
         shadowItem.state = window?.hasShadow == true ? .on : .off
         menu.addItem(NSMenuItem.separator())
@@ -615,6 +657,10 @@ private class PinView: NSView {
 
     @objc private func toggleShadow() {
         onToggleShadow?()
+    }
+
+    @objc private func toggleMarkdownRendering() {
+        onToggleMarkdownRendering?()
     }
 
     override func mouseDown(with event: NSEvent) {

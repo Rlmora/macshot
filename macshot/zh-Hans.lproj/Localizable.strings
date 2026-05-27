@@ -147,6 +147,7 @@
 "Smart" = "智能";
 "Padding" = "边距";
 "Shadow" = "阴影";
+"Render Markdown" = "渲染 Markdown";
 "Right-click to add points" = "右键点按以添加控制点";
 "Hold 1 auto-vertical  ·  Hold 2 auto-horizontal" = "按住 1 自动垂直  ·  按住 2 自动水平";
 
