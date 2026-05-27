@@ -37,6 +37,7 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     private var screenshotNeverOutput: Bool = true
     /// When true, force beautify off on open (image already has beautify baked in).
     private var disableBeautifyOnOpen: Bool = false
+    private var isPreparingShare = false
 
     /// Open an editor window with the given image (typically from captureSelectedRegion).
     /// When `disableBeautify` is true, beautify starts off regardless of UserDefaults
@@ -161,17 +162,13 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
             topBar.showDoneButton()
             topBar.onDone = { [weak self] in self?.commitToHistory() }
         }
-        if let scale = NSScreen.main?.backingScaleFactor,
-           let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+        if let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             topBar.updateSizeLabel(width: cg.width, height: cg.height)
         }
 
         // Observe scroll view magnification for zoom label
-        let updateZoom = { [weak topBar, weak scrollView] (_: Notification) in
-            if let mag = scrollView?.magnification { topBar?.updateZoom(mag) }
-        }
-        NotificationCenter.default.addObserver(forName: NSScrollView.didEndLiveMagnifyNotification, object: scrollView, queue: .main, using: updateZoom)
-        NotificationCenter.default.addObserver(forName: NSScrollView.didLiveScrollNotification, object: scrollView, queue: .main, using: updateZoom)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateZoomFromScrollViewNotification(_:)), name: NSScrollView.didEndLiveMagnifyNotification, object: scrollView)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateZoomFromScrollViewNotification(_:)), name: NSScrollView.didLiveScrollNotification, object: scrollView)
 
         // Set chrome parent BEFORE applySelection so toolbars are added to container, not documentView
         view.chromeParentView = container
@@ -272,16 +269,21 @@ class DetachedEditorWindowController: NSObject, NSWindowDelegate {
     }
 
     func windowWillClose(_ notification: Notification) {
+        NotificationCenter.default.removeObserver(self)
         overlayView?.reset()
         overlayView?.overlayDelegate = nil
         window?.contentView = nil
         overlayView = nil
-        let closingWindow = window
         window = nil
         Self.activeControllers.removeAll { $0 === self }
         if Self.activeControllers.isEmpty {
             (NSApp.delegate as? AppDelegate)?.returnFocusIfNeeded()
         }
+    }
+
+    @objc private func updateZoomFromScrollViewNotification(_ notification: Notification) {
+        guard let scrollView = notification.object as? NSScrollView else { return }
+        topBar?.updateZoom(scrollView.magnification)
     }
 
     /// Save current editor state to the linked history entry (without closing).
@@ -363,16 +365,21 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
         guard let view = overlayView,
               let raw = view.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
-        guard let imageData = ImageEncoder.encode(image) else { return }
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
         savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
         savePanel.directoryURL = SaveDirectoryAccess.directoryHint()
         savePanel.beginSheetModal(for: window!) { [weak self] response in
             if response == .OK, let url = savePanel.url {
-                try? imageData.write(to: url)
-                self?.playCopySound()
-                self?.autoSaveToHistoryIfNeeded(compositedImage: image)
+                let imageToSave = image
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let imageData = ImageEncoder.encode(imageToSave) else { return }
+                    try? imageData.write(to: url)
+                    DispatchQueue.main.async {
+                        self?.playCopySound()
+                        self?.autoSaveToHistoryIfNeeded(compositedImage: imageToSave)
+                    }
+                }
             }
         }
     }
@@ -481,17 +488,28 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
     }
 
     func overlayViewDidRequestShare(anchorView: NSView?) {
+        guard !isPreparingShare else { return }
         guard let raw = overlayView?.captureSelectedRegion() else { return }
         let image = applyPostProcessing(raw)
-        guard let imageData = ImageEncoder.encode(image) else { return }
-        let tempURL = TmpScratchDirectory.makeURL(filename: FilenameFormatter.defaultImageFilename())
-        try? imageData.write(to: tempURL)
-
-        let picker = NSSharingServicePicker(items: [tempURL])
-        if let anchor = anchorView {
-            picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minX)
-        } else if let view = overlayView {
-            picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
+        let filename = FilenameFormatter.defaultImageFilename()
+        isPreparingShare = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak anchorView] in
+            guard let imageData = ImageEncoder.encode(image) else {
+                DispatchQueue.main.async { self?.isPreparingShare = false }
+                return
+            }
+            let tempURL = TmpScratchDirectory.makeURL(filename: filename)
+            try? imageData.write(to: tempURL)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.isPreparingShare = false
+                let picker = NSSharingServicePicker(items: [tempURL])
+                if let anchor = anchorView {
+                    picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minX)
+                } else if let view = self.overlayView {
+                    picker.show(relativeTo: .zero, of: view, preferredEdge: .minY)
+                }
+            }
         }
         autoSaveToHistoryIfNeeded(compositedImage: image)
     }
@@ -500,10 +518,11 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
     func overlayViewDidRequestRemoveBackground() {
         guard let image = overlayView?.captureSelectedRegion(),
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let imageSize = image.size
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                let request = VNGenerateForegroundInstanceMaskRequest()
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
                 try handler.perform([request])
                 guard let result = request.results?.first else { return }
                 let mask = try result.generateScaledMaskForImage(forInstances: result.allInstances, from: handler)
@@ -515,7 +534,7 @@ extension DetachedEditorWindowController: OverlayViewDelegate {
                 guard let out = filter.outputImage,
                       let cg = CIContext().createCGImage(out, from: out.extent) else { return }
                 DispatchQueue.main.async {
-                    let finalImage = NSImage(cgImage: cg, size: image.size)
+                    let finalImage = NSImage(cgImage: cg, size: imageSize)
                     ImageEncoder.copyToClipboard(finalImage)
                     self.playCopySound()
                     (NSApp.delegate as? AppDelegate)?.showFloatingThumbnail(image: finalImage)

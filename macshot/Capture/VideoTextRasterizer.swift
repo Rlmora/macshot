@@ -121,7 +121,6 @@ enum VideoTextRasterizer {
         }
 
         // 2. Text.
-        let descriptor = NSFontDescriptor(name: "", size: pxFontSize)
         var traits: NSFontDescriptor.SymbolicTraits = []
         if spec.bold { traits.insert(.bold) }
         if spec.italic { traits.insert(.italic) }

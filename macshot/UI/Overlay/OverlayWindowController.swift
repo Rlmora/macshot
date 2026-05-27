@@ -614,52 +614,54 @@ extension OverlayWindowController: OverlayViewDelegate {
 
         guard var image = captureRegion() else { return }
         image = applyBeautifyIfNeeded(image) ?? image
-        guard let imageData = ImageEncoder.encode(image) else { return }
-        let tempURL = TmpScratchDirectory.makeURL(
-            filename: FilenameFormatter.defaultImageFilename(windowTitle: capturedWindowTitle))
-        try? imageData.write(to: tempURL)
-
-        // Get the screen position of the share button
-        let screenRect: NSRect
-        if let anchor = anchorView, let win = anchor.window {
-            let viewRect = anchor.convert(anchor.bounds, to: nil)
-            screenRect = win.convertToScreen(viewRect)
-        } else {
-            let mid = NSScreen.main?.frame ?? NSRect(x: 400, y: 400, width: 100, height: 100)
-            screenRect = NSRect(x: mid.midX - 20, y: mid.midY - 20, width: 40, height: 40)
-        }
+        shareDelegate = SharePickerDelegate(onPick: {}, onDismiss: {})
 
         // Temporarily lower the overlay so the system share picker popover appears on top.
         // NSSharingServicePicker creates its own window at a standard level that we can't control.
         let savedLevel = overlayWindow?.level ?? NSWindow.Level(257)
         overlayWindow?.level = .floating
 
-        let picker = NSSharingServicePicker(items: [tempURL])
-        let delegate = SharePickerDelegate(
-            onPick: { [weak self] in
-                guard let self = self else { return }
-                self.overlayWindow?.level = savedLevel
-                self.shareDelegate = nil
-                self.playCopySound()
-                let img = image
-                self.dismiss()
-                self.overlayDelegate?.overlayDidConfirm(self, capturedImage: img, annotationData: nil)
-            },
-            onDismiss: { [weak self] in
-                self?.overlayWindow?.level = savedLevel
-                self?.shareDelegate = nil
-                self?.shareDismissTime = Date()
+        let filename = FilenameFormatter.defaultImageFilename(windowTitle: capturedWindowTitle)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self, weak anchorView] in
+            guard let imageData = ImageEncoder.encode(image) else {
+                DispatchQueue.main.async {
+                    self?.overlayWindow?.level = savedLevel
+                    self?.shareDelegate = nil
+                    self?.shareDismissTime = Date()
+                }
+                return
             }
-        )
-        shareDelegate = delegate
-        picker.delegate = delegate
+            let tempURL = TmpScratchDirectory.makeURL(filename: filename)
+            try? imageData.write(to: tempURL)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                let picker = NSSharingServicePicker(items: [tempURL])
+                let delegate = SharePickerDelegate(
+                    onPick: { [weak self] in
+                        guard let self = self else { return }
+                        self.overlayWindow?.level = savedLevel
+                        self.shareDelegate = nil
+                        self.playCopySound()
+                        let img = image
+                        self.dismiss()
+                        self.overlayDelegate?.overlayDidConfirm(self, capturedImage: img, annotationData: nil)
+                    },
+                    onDismiss: { [weak self] in
+                        self?.overlayWindow?.level = savedLevel
+                        self?.shareDelegate = nil
+                        self?.shareDismissTime = Date()
+                    }
+                )
+                self.shareDelegate = delegate
+                picker.delegate = delegate
 
-        // Show anchored to the button in the overlay view
-        if let anchor = anchorView {
-            picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
-        } else if let view = overlayView {
-            let center = NSRect(x: view.bounds.midX - 1, y: view.bounds.midY - 1, width: 2, height: 2)
-            picker.show(relativeTo: center, of: view, preferredEdge: .minY)
+                if let anchor = anchorView {
+                    picker.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+                } else if let view = self.overlayView {
+                    let center = NSRect(x: view.bounds.midX - 1, y: view.bounds.midY - 1, width: 2, height: 2)
+                    picker.show(relativeTo: center, of: view, preferredEdge: .minY)
+                }
+            }
         }
     }
 
@@ -806,11 +808,12 @@ extension OverlayWindowController: OverlayViewDelegate {
             return
         }
 
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let imageSize = image.size
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
+                let request = VNGenerateForegroundInstanceMaskRequest()
+                let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
                 try handler.perform([request])
                 guard let result = request.results?.first else {
                     throw NSError(domain: "Macshot", code: 1)
@@ -842,7 +845,7 @@ extension OverlayWindowController: OverlayViewDelegate {
                         outputCIImage, from: outputCIImage.extent)
                 else { throw NSError(domain: "Macshot", code: 4) }
 
-                let finalNSImage = NSImage(cgImage: finalCGImage, size: image.size)
+                let finalNSImage = NSImage(cgImage: finalCGImage, size: imageSize)
 
                 DispatchQueue.main.async {
                     // quickCaptureMode: 0=save, 1=copy, 2=both, 3=do nothing
@@ -978,7 +981,6 @@ extension OverlayWindowController: OverlayViewDelegate {
     func overlayViewDidRequestSave() {
         guard var image = captureRegion() else { return }
         image = applyBeautifyIfNeeded(image) ?? image
-        guard let imageData = ImageEncoder.encode(image) else { return }
 
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
@@ -990,10 +992,17 @@ extension OverlayWindowController: OverlayViewDelegate {
         savePanel.begin { [weak self] response in
             guard let self = self else { return }
             if response == .OK, let url = savePanel.url {
-                try? imageData.write(to: url)
-                self.playCopySound()
-                self.dismiss()
-                self.overlayDelegate?.overlayDidConfirm(self, capturedImage: nil, annotationData: nil)
+                let imageToSave = image
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    guard let imageData = ImageEncoder.encode(imageToSave) else { return }
+                    try? imageData.write(to: url)
+                    DispatchQueue.main.async {
+                        guard let self = self else { return }
+                        self.playCopySound()
+                        self.dismiss()
+                        self.overlayDelegate?.overlayDidConfirm(self, capturedImage: nil, annotationData: nil)
+                    }
+                }
             } else {
                 self.overlayWindow?.makeKeyAndOrderFront(nil)
                 if let view = self.overlayView {

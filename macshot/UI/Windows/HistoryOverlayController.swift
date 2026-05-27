@@ -214,7 +214,6 @@ final class HistoryOverlayController: NSObject, QLPreviewPanelDataSource, QLPrev
         guard index >= 0, index < entries.count else { return }
         let entry = entries[index]
         guard let image = ScreenshotHistory.shared.loadImage(for: entry) else { return }
-        guard let imageData = ImageEncoder.encode(image) else { return }
 
         let template = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
         let base = FilenameFormatter.format(template: template, date: entry.timestamp)
@@ -223,7 +222,10 @@ final class HistoryOverlayController: NSObject, QLPreviewPanelDataSource, QLPrev
         panel.level = .floating
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
-            try? imageData.write(to: url)
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let imageData = ImageEncoder.encode(image) else { return }
+                try? imageData.write(to: url)
+            }
         }
     }
 

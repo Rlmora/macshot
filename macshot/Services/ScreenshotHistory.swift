@@ -129,7 +129,6 @@ class ScreenshotHistory {
         let previewURL = historyDir.appendingPathComponent("\(id)_preview.png")
         let rawURL = historyDir.appendingPathComponent("\(id)_raw.png")
         let annURL = historyDir.appendingPathComponent("\(id)_annotations.json")
-        let histDir = historyDir
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
             let thumb = self.makeThumbnail(image: image, maxWidth: 36)

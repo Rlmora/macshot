@@ -52,26 +52,24 @@ enum ImageEncoder {
         }
     }
 
-    // MARK: - Shared bitmap creation
+    // MARK: - Shared image creation
 
-    /// Create a bitmap representation from an NSImage, optionally downscaling from Retina.
-    /// This is the single conversion point — all encode paths go through here.
+    /// Create a CGImage from an NSImage, optionally downscaling from Retina.
     /// Uses cgImage(forProposedRect:) instead of tiffRepresentation to preserve
     /// exact pixel data regardless of the current display's backing scale factor.
-    private static func makeBitmap(_ image: NSImage, downscale: Bool = downscaleRetina) -> NSBitmapImageRep? {
+    static func cgImage(for image: NSImage, downscale: Bool = downscaleRetina) -> CGImage? {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             // Fallback for images without a CGImage backing (e.g. PDF/EPS vectors)
             guard let tiffData = image.tiffRepresentation,
                   let bitmap = NSBitmapImageRep(data: tiffData) else { return nil }
-            return bitmap
+            return bitmap.cgImage
         }
-        let bitmap = NSBitmapImageRep(cgImage: cgImage)
 
         if downscale {
             let logicalW = Int(image.size.width)
             let logicalH = Int(image.size.height)
-            let pixelW = bitmap.pixelsWide
-            let pixelH = bitmap.pixelsHigh
+            let pixelW = cgImage.width
+            let pixelH = cgImage.height
 
             if pixelW > logicalW && pixelH > logicalH {
                 let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
@@ -83,79 +81,71 @@ enum ImageEncoder {
                     bytesPerRow: logicalW * 4,
                     space: cs,
                     bitmapInfo: bitmapInfo
-                ) else { return bitmap }
+                ) else { return cgImage }
                 ctx.interpolationQuality = .high
                 ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: logicalW, height: logicalH))
-                guard let downscaled = ctx.makeImage() else { return bitmap }
-                return NSBitmapImageRep(cgImage: downscaled)
+                guard let downscaled = ctx.makeImage() else { return cgImage }
+                return downscaled
             }
         }
 
-        return bitmap
+        return cgImage
     }
 
     // MARK: - Encoding
 
     /// Encode an NSImage to Data in the configured format.
     static func encode(_ image: NSImage) -> Data? {
-        guard let bitmap = makeBitmap(image) else { return nil }
+        guard let cgImage = cgImage(for: image) else { return nil }
 
         switch format {
         case .png:
-            return encodePNG(bitmap: bitmap)
+            return encodePNG(cgImage: cgImage)
         case .jpeg:
-            return encodeJPEG(bitmap: bitmap, quality: quality)
+            return encodeJPEG(cgImage: cgImage, quality: quality)
         case .heic:
-            return encodeHEIC(bitmap: bitmap, quality: quality)
+            return encodeHEIC(cgImage: cgImage, quality: quality)
         case .webp:
-            return encodeWebP(bitmap: bitmap, quality: quality)
+            return encodeWebP(cgImage: cgImage, quality: quality)
         }
     }
 
     /// Encode PNG with native color profile embedded.
-    private static func encodePNG(bitmap: NSBitmapImageRep) -> Data? {
-        guard let cgImage = bitmap.cgImage else {
-            return bitmap.representation(using: .png, properties: [:])
-        }
+    private static func encodePNG(cgImage: CGImage) -> Data? {
         return encodeWithCGImageDestination(cgImage: cgImage, type: "public.png", lossyQuality: nil)
     }
 
     /// Stable PNG bytes for features that need image identity independent of
     /// the user's configured output format.
     static func pngData(for image: NSImage) -> Data? {
-        guard let bitmap = makeBitmap(image, downscale: false) else { return nil }
-        return bitmap.representation(using: .png, properties: [:])
+        guard let cgImage = cgImage(for: image, downscale: false) else { return nil }
+        return encodePNG(cgImage: cgImage)
     }
 
     /// Encode JPEG with native color profile embedded.
-    private static func encodeJPEG(bitmap: NSBitmapImageRep, quality: CGFloat) -> Data? {
-        guard let cgImage = bitmap.cgImage else {
-            return bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality])
-        }
+    private static func encodeJPEG(cgImage: CGImage, quality: CGFloat) -> Data? {
         return encodeWithCGImageDestination(cgImage: cgImage, type: "public.jpeg", lossyQuality: quality)
     }
 
     /// Encode HEIC via CGImageDestination (NSBitmapImageRep doesn't support HEIC).
-    private static func encodeHEIC(bitmap: NSBitmapImageRep, quality: CGFloat) -> Data? {
-        guard let cgImage = bitmap.cgImage else { return nil }
+    private static func encodeHEIC(cgImage: CGImage, quality: CGFloat) -> Data? {
         return encodeWithCGImageDestination(cgImage: cgImage, type: "public.heic", lossyQuality: quality)
     }
 
     /// Encode WebP via Swift-WebP (libwebp).
     /// Uses the CGImage RGBA path directly — the library's NSImage path has a bug
     /// (assumes RGB stride and logical size instead of pixel size).
-    private static func encodeWebP(bitmap: NSBitmapImageRep, quality: CGFloat) -> Data? {
-        guard let srcImage = bitmap.cgImage else { return nil }
-        let w = srcImage.width
-        let h = srcImage.height
+    private static func encodeWebP(cgImage: CGImage, quality: CGFloat) -> Data? {
+        let w = cgImage.width
+        let h = cgImage.height
         // Re-render into a known premultipliedLast RGBA context (preserving source color space)
-        let cs = srcImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let cs = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
         guard let ctx = CGContext(
             data: nil, width: w, height: h,
             bitsPerComponent: 8, bytesPerRow: w * 4,
             space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        ctx.draw(srcImage, in: CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: w, height: h))
         guard let rgbaImage = ctx.makeImage() else { return nil }
 
         let encoder = WebPEncoder()
@@ -213,8 +203,8 @@ enum ImageEncoder {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let bitmap = makeBitmap(image),
-                  let pngData = bitmap.representation(using: .png, properties: [:]) else { return }
+            guard let cgImage = cgImage(for: image),
+                  let pngData = encodePNG(cgImage: cgImage) else { return }
 
             // Compute the new file path with a date-stamped filename so
             // Finder pastes land as a nicely named file. A counter suffix

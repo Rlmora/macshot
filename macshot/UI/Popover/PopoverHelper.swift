@@ -23,13 +23,7 @@ enum PopoverHelper {
         popover.contentViewController = vc
         popover.show(relativeTo: rect, of: view, preferredEdge: preferredEdge)
 
-        // Ensure popover appears above high-level overlay windows
-        if let popoverWindow = popover.contentViewController?.view.window {
-            let parentLevel = view.window?.level ?? .normal
-            if parentLevel.rawValue > NSWindow.Level.normal.rawValue {
-                popoverWindow.level = NSWindow.Level(parentLevel.rawValue + 1)
-            }
-        }
+        raisePopoverWindow(popover, above: view.window?.level ?? .normal)
         activePopover = popover
     }
 
@@ -55,13 +49,7 @@ enum PopoverHelper {
         popover.delegate = AnchorCleanupDelegate.shared
         popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: preferredEdge)
 
-        // Ensure popover appears above high-level overlay windows
-        if let popoverWindow = popover.contentViewController?.view.window {
-            let parentLevel = parentView.window?.level ?? .normal
-            if parentLevel.rawValue > NSWindow.Level.normal.rawValue {
-                popoverWindow.level = NSWindow.Level(parentLevel.rawValue + 1)
-            }
-        }
+        raisePopoverWindow(popover, above: parentView.window?.level ?? .normal)
         activePopover = popover
     }
 
@@ -88,6 +76,15 @@ enum PopoverHelper {
         wrapper.addSubview(contentView)
         contentView.frame.origin = .zero
         return wrapper
+    }
+
+    private static func raisePopoverWindow(_ popover: NSPopover, above parentLevel: NSWindow.Level) {
+        guard parentLevel.rawValue > NSWindow.Level.normal.rawValue else { return }
+        let level = NSWindow.Level(parentLevel.rawValue + 1)
+        popover.contentViewController?.view.window?.level = level
+        DispatchQueue.main.async {
+            popover.contentViewController?.view.window?.level = level
+        }
     }
 }
 

@@ -550,6 +550,7 @@ class OverlayView: NSView {
     /// During drag/resize, this holds a cache of all annotations EXCEPT the ones being manipulated.
     private var cachedAnnotationLayerExcludingSelected: NSImage? = nil
     private var cachedOpaqueRect: NSRect?  // cached opaque content bounds of screenshotImage
+    private let annotationLayerCacheThreshold = 8
 
     var isTranslating: Bool = false
     var translateEnabled: Bool = false
@@ -1345,6 +1346,9 @@ class OverlayView: NSView {
     /// Override point for editor-specific graphics context transform. Base does nothing.
     func applyEditorTransform(to context: NSGraphicsContext) {}
 
+    /// Override to let embedded editors resize their chrome when preview bounds change.
+    func requestEditorChromeRelayout() {}
+
     /// Override to control whether selection resize handles are active. Base returns true when not in editor mode or scroll capturing.
     func shouldAllowSelectionResize() -> Bool { !isEditorMode && !isScrollCapturing }
 
@@ -1495,10 +1499,6 @@ class OverlayView: NSView {
             let editorDrawnFromCache = (self as? EditorView)?.drewFromCompositeCache ?? false
 
             if !editorDrawnFromCache {
-                // Use cached annotation layer whenever possible — even during active
-                // drawing. Committed annotations don't change while a new stroke is
-                // being drawn, so re-iterating them every frame wastes CPU and causes
-                // event coalescing (fewer mouse events → over-smoothed strokes).
                 if !annotations.isEmpty && !isEditorMode {
                     if (isDraggingAnnotation || isResizingAnnotation || isRotatingAnnotation),
                        let staticLayer = cachedAnnotationLayerExcludingSelected {
@@ -1509,11 +1509,15 @@ class OverlayView: NSView {
                         for annotation in selectedAnnotations {
                             annotation.draw(in: context)
                         }
-                    } else {
+                    } else if shouldUseAnnotationLayerCache {
                         let layer = annotationLayerImage()
                         context.saveGraphicsState()
                         applyCanvasTransform(to: context)
                         layer.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1.0)
+                    } else {
+                        context.saveGraphicsState()
+                        applyCanvasTransform(to: context)
+                        drawAnnotationsIndividually(in: context, annotations: annotations)
                     }
                 } else if !annotations.isEmpty {
                     // Editor mode: no annotation layer cache, draw individually.
@@ -2738,7 +2742,6 @@ class OverlayView: NSView {
         screenshotImage = NSImage(cgImage: flipped, size: original.size)
 
         // Mirror annotation X coordinates around the image center
-        let imgW = original.size.width
         for ann in annotations {
             ann.startPoint.x = selectionRect.minX + (selectionRect.maxX - ann.startPoint.x)
             ann.endPoint.x = selectionRect.minX + (selectionRect.maxX - ann.endPoint.x)
@@ -3410,7 +3413,7 @@ class OverlayView: NSView {
     /// Convert a point in view space to canvas (annotation) space by reversing the zoom transform.
     func viewToCanvas(_ p: NSPoint) -> NSPoint {
         if isInsideScrollView { return p }
-        var q = adjustPointForEditor(p)
+        let q = adjustPointForEditor(p)
         if zoomLevel == 1.0 && zoomAnchorCanvas == .zero && zoomAnchorView == .zero { return q }
         guard zoomAnchorCanvas != .zero || zoomAnchorView != .zero else { return q }
         return NSPoint(
@@ -3480,7 +3483,6 @@ class OverlayView: NSView {
         // Map canvas rect → CGImage pixel rect.
         // CGImage uses top-left origin; canvas uses bottom-left.
         let pointsW = originalImage.size.width
-        let pointsH = originalImage.size.height
         let pixScale = CGFloat(cgOriginal.width) / pointsW
 
         let normX = (canvasRect.minX - selectionRect.minX) / selectionRect.width
@@ -3935,19 +3937,6 @@ class OverlayView: NSView {
         let unrotatedBBox = baseBBox.insetBy(dx: -padding, dy: -padding)
         guard unrotatedBBox.width > 0, unrotatedBBox.height > 0 else { return }
 
-        // Expand to rotated bounding box for the draw rect so the image covers the full rotated shape
-        let drawBBox: NSRect
-        if annotation.rotation != 0 && annotation.supportsRotation {
-            let cx = unrotatedBBox.midX, cy = unrotatedBBox.midY
-            let cos_r = abs(cos(annotation.rotation)), sin_r = abs(sin(annotation.rotation))
-            let w = unrotatedBBox.width, h = unrotatedBBox.height
-            let rotW = w * cos_r + h * sin_r
-            let rotH = w * sin_r + h * cos_r
-            drawBBox = NSRect(x: cx - rotW / 2, y: cy - rotH / 2, width: rotW, height: rotH)
-        } else {
-            drawBBox = unrotatedBBox
-        }
-
         // Use cached glow if available and unrotated position hasn't changed.
         // Rotation is handled at draw time via transform, not by regenerating the glow.
         if let cached = annotation.outlineGlowImage, annotation.outlineGlowRect == unrotatedBBox {
@@ -4256,7 +4245,7 @@ class OverlayView: NSView {
     }
 
     /// Reposition toolbar strips based on current selection/bounds. Cheap — safe to call from draw().
-    private func repositionToolbars() {
+    func repositionToolbars() {
         guard let bottomStrip = bottomStripView, let rightStrip = rightStripView else { return }
 
         // In editor mode, let toolbar gap clicks pass through to the image beneath
@@ -4842,7 +4831,6 @@ class OverlayView: NSView {
             // work (#154). Treat outside clicks as a no-op once we have a
             // committed selection; ESC still cancels deliberately.
             return
-            needsDisplay = true
 
         case .selecting:
             break
@@ -6410,13 +6398,15 @@ class OverlayView: NSView {
             commitTextFieldIfNeeded()
             stampPreviewPoint = nil
             loupeCursorPoint = .zero
-            // Auto-enable beautify on first click in this session
+            beautifyEnabled.toggle()
+            UserDefaults.standard.set(beautifyEnabled, forKey: "beautifyEnabled")
+            startBeautifyToolbarAnimation()
+            showBeautifyInOptionsRow = beautifyEnabled
             if !beautifyEnabled {
-                beautifyEnabled = true
-                UserDefaults.standard.set(true, forKey: "beautifyEnabled")
-                startBeautifyToolbarAnimation()
+                PopoverHelper.dismiss()
             }
-            showBeautifyInOptionsRow = true
+            rebuildToolbarLayout()
+            requestEditorChromeRelayout()
             needsDisplay = true
         case .beautifyStyle:
             beautifyStyleIndex = (beautifyStyleIndex + 1) % BeautifyRenderer.styles.count
@@ -6786,8 +6776,7 @@ class OverlayView: NSView {
                 isDraggingAnnotation = true
                 didMoveAnnotation = false
                 annotationDragStart = point
-                // Build cache of non-selected annotations for fast drag rendering
-                cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
+                prepareAnnotationLayerExcludingSelected()
                 NSCursor.closedHand.set()
                 needsDisplay = true
                 return
@@ -6831,8 +6820,7 @@ class OverlayView: NSView {
                         self.isDraggingAnnotation = true
                         self.didMoveAnnotation = false
                         self.annotationDragStart = point
-                        // Build cache of non-selected annotations for fast drag rendering
-                        self.cachedAnnotationLayerExcludingSelected = self.buildAnnotationLayer(excluding: Set(self.selectedAnnotations.map { ObjectIdentifier($0) }))
+                        self.prepareAnnotationLayerExcludingSelected()
                         // Cancel any in-progress pencil stroke
                         self.currentAnnotation = nil
                         NSCursor.closedHand.set()
@@ -6950,8 +6938,7 @@ class OverlayView: NSView {
             let (handle, rect) = handleEntry
             if rect.insetBy(dx: -4, dy: -4).contains(handleTestPoint) {
                 isResizingAnnotation = true
-                // Build cache of non-selected annotations for fast resize rendering
-                cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
+                prepareAnnotationLayerExcludingSelected()
                 annotationResizeHandle = handle
                 annotationResizeOrigStart = selected.startPoint
                 annotationResizeOrigEnd = selected.endPoint
@@ -6984,7 +6971,7 @@ class OverlayView: NSView {
             && annotationRotateHandleRect.insetBy(dx: -6, dy: -6).contains(point)
         {
             isRotatingAnnotation = true
-            cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
+            prepareAnnotationLayerExcludingSelected()
             beginAnnotationRotation(selected, at: point)
             NSCursor.closedHand.set()
             needsDisplay = true
@@ -7035,7 +7022,7 @@ class OverlayView: NSView {
             isDraggingAnnotation = true
             didMoveAnnotation = false
             annotationDragStart = point
-            cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
+            prepareAnnotationLayerExcludingSelected()
             NSCursor.closedHand.set()
             needsDisplay = true
             return true
@@ -7706,18 +7693,12 @@ class OverlayView: NSView {
     }
 
     private func clearHoverIfNeeded(_ removed: [Annotation]) {
-        var changed = false
         if let h = hoveredAnnotation, removed.contains(where: { $0 === h }) {
             hoveredAnnotationClearTimer?.invalidate()
             hoveredAnnotationClearTimer = nil
             hoveredAnnotation = nil
-            changed = true
         }
-        let beforeCount = selectedAnnotations.count
         selectedAnnotations.removeAll { ann in removed.contains(where: { $0 === ann }) }
-        if selectedAnnotations.count != beforeCount {
-            changed = true
-        }
     }
 
     func redo() {
@@ -7767,6 +7748,10 @@ class OverlayView: NSView {
 
     // MARK: - Annotation layer cache
 
+    private var shouldUseAnnotationLayerCache: Bool {
+        annotations.count >= annotationLayerCacheThreshold
+    }
+
     /// Render all committed annotations into a transparent bitmap (canvas-space, no zoom).
     /// Reused across frames until annotations change, avoiding per-frame iteration.
     private func annotationLayerImage() -> NSImage {
@@ -7776,11 +7761,17 @@ class OverlayView: NSView {
         return image
     }
 
-    var annotationLayerCache: NSImage? { cachedAnnotationLayer }
+    var annotationLayerCache: NSImage? {
+        shouldUseAnnotationLayerCache ? cachedAnnotationLayer : nil
+    }
 
     /// Incrementally add a newly committed annotation onto a previous cache snapshot.
     /// Avoids a full rebuild which can cause a visible lag (cursor disappears for a frame).
     func appendToAnnotationCache(_ annotation: Annotation, previousCache: NSImage) {
+        guard shouldUseAnnotationLayerCache else {
+            cachedAnnotationLayer = nil
+            return
+        }
         guard let existingCG = previousCache.cgImage(forProposedRect: nil, context: nil, hints: nil)
         else { return }
 
@@ -7817,6 +7808,15 @@ class OverlayView: NSView {
         return renderAnnotationBitmap(annotations: filtered)
     }
 
+    private func prepareAnnotationLayerExcludingSelected() {
+        guard shouldUseAnnotationLayerCache else {
+            cachedAnnotationLayerExcludingSelected = nil
+            return
+        }
+        cachedAnnotationLayerExcludingSelected = buildAnnotationLayer(
+            excluding: Set(selectedAnnotations.map { ObjectIdentifier($0) }))
+    }
+
     /// Render annotations into a fixed bitmap at the current backing scale.
     /// Uses CGBitmapContext with the window's color space so colors match exactly.
     /// Returns an NSImage backed by a CGImage so AppKit never re-invokes a
@@ -7839,16 +7839,20 @@ class OverlayView: NSView {
         let nsCtx = NSGraphicsContext(cgContext: cgCtx, flipped: false)
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = nsCtx
-        for annotation in annotations where annotation.tool == .pixelate {
-            annotation.draw(in: nsCtx)
-        }
-        for annotation in annotations where annotation.tool != .pixelate {
-            annotation.draw(in: nsCtx)
-        }
+        drawAnnotationsIndividually(in: nsCtx, annotations: annotations)
         NSGraphicsContext.restoreGraphicsState()
 
         guard let cgImage = cgCtx.makeImage() else { return NSImage(size: size) }
         return NSImage(cgImage: cgImage, size: size)
+    }
+
+    private func drawAnnotationsIndividually(in context: NSGraphicsContext, annotations: [Annotation]) {
+        for annotation in annotations where annotation.tool == .pixelate {
+            annotation.draw(in: context)
+        }
+        for annotation in annotations where annotation.tool != .pixelate {
+            annotation.draw(in: context)
+        }
     }
 
     // MARK: - Output

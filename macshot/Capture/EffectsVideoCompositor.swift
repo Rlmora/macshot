@@ -10,7 +10,7 @@ import CoreVideo
 /// the mutable subclass internally and delivers a plain
 /// `AVVideoCompositionInstruction` to `startRequest` — dropping all our
 /// payload fields. Conforming to the protocol directly avoids that round-trip.
-final class EffectsCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol {
+final class EffectsCompositionInstruction: NSObject, AVVideoCompositionInstructionProtocol, @unchecked Sendable {
 
     /// One contiguous mapping from composition-clock time back to source-asset
     /// time. The compositor picks the entry covering the current frame's
@@ -132,7 +132,7 @@ final class EffectsVideoCompositor: NSObject, AVVideoCompositing {
     // MARK: Required attributes
 
     /// What we can accept from the asset reader.
-    let sourcePixelBufferAttributes: [String: Any]? = [
+    let sourcePixelBufferAttributes: [String: any Sendable]? = [
         kCVPixelBufferPixelFormatTypeKey as String: [
             kCVPixelFormatType_32BGRA,
         ],
@@ -140,7 +140,7 @@ final class EffectsVideoCompositor: NSObject, AVVideoCompositing {
     ]
 
     /// What we produce. Must be compatible with the render context.
-    let requiredPixelBufferAttributesForRenderContext: [String: Any] = [
+    let requiredPixelBufferAttributesForRenderContext: [String: any Sendable] = [
         kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
         kCVPixelBufferMetalCompatibilityKey as String: true,
     ]

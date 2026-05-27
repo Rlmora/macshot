@@ -194,7 +194,9 @@ class FloatingThumbnailController: NSObject, NSDraggingSource {
             )
             window.animator().alphaValue = 0
         }, completionHandler: { [weak self] in
-            self?.dismiss()
+            Task { @MainActor [weak self] in
+                self?.dismiss()
+            }
         })
     }
 

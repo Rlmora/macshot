@@ -124,11 +124,7 @@ final class RecordingEngine: NSObject {
             pauseStartTime = nil
         }
         state = .recording
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.elapsedSeconds += 1
-            self.onProgress?(self.elapsedSeconds)
-        }
+        startProgressTimer()
         onPauseChanged?(false)
     }
 
@@ -229,15 +225,22 @@ final class RecordingEngine: NSObject {
 
             await MainActor.run {
                 self.elapsedSeconds = 0
-                self.progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                    guard let self = self else { return }
-                    self.elapsedSeconds += 1
-                    self.onProgress?(self.elapsedSeconds)
-                }
+                self.startProgressTimer()
             }
 
         } catch {
             await MainActor.run { self.fail(error) }
+        }
+    }
+
+    private func startProgressTimer() {
+        progressTimer?.invalidate()
+        progressTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.elapsedSeconds += 1
+                self.onProgress?(self.elapsedSeconds)
+            }
         }
     }
 
@@ -504,6 +507,8 @@ private class RecordingStreamOutput: NSObject, SCStreamOutput, SCStreamDelegate 
             onFrame?(pixelBuffer, pts)
         case .audio:
             onAudioSample?(sampleBuffer)
+        case .microphone:
+            break
         @unknown default:
             break
         }

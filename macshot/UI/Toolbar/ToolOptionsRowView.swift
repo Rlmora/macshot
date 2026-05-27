@@ -1182,23 +1182,6 @@ class ToolOptionsRowView: NSView {
         arrowBtn.contentTintColor = ToolbarLayout.iconColor.withAlphaComponent(0.6)
         curX += 18
 
-        curX = addSeparator(at: curX)
-
-        // On/off toggle
-        let toggleBtn = NSButton(checkboxWithTitle: L("On"), target: self, action: #selector(beautifyToggleChanged(_:)))
-        toggleBtn.state = ov.beautifyEnabled ? .on : .off
-        toggleBtn.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        if let cell = toggleBtn.cell as? NSButtonCell {
-            cell.attributedTitle = NSAttributedString(string: L("On"), attributes: [
-                .foregroundColor: ToolbarLayout.iconColor.withAlphaComponent(0.7),
-                .font: NSFont.systemFont(ofSize: 10, weight: .medium)
-            ])
-        }
-        toggleBtn.sizeToFit()
-        toggleBtn.frame.origin = NSPoint(x: curX, y: (rowHeight - toggleBtn.frame.height) / 2)
-        addSubview(toggleBtn)
-        curX += toggleBtn.frame.width + 4
-
         return curX
     }
 
@@ -1228,6 +1211,7 @@ class ToolOptionsRowView: NSView {
         guard let ov = overlayView else { return }
         ov.beautifyMode = sender.selectedSegment == 0 ? .window : .rounded
         UserDefaults.standard.set(ov.beautifyMode.rawValue, forKey: "beautifyMode")
+        ov.requestEditorChromeRelayout()
         ov.needsDisplay = true
     }
 
@@ -1235,6 +1219,7 @@ class ToolOptionsRowView: NSView {
         guard let ov = overlayView else { return }
         ov.beautifyPadding = CGFloat(sender.floatValue)
         UserDefaults.standard.set(sender.doubleValue, forKey: "beautifyPadding")
+        ov.requestEditorChromeRelayout()
         ov.needsDisplay = true
     }
 
@@ -1249,6 +1234,7 @@ class ToolOptionsRowView: NSView {
         guard let ov = overlayView else { return }
         ov.beautifyShadowRadius = CGFloat(sender.floatValue)
         UserDefaults.standard.set(sender.doubleValue, forKey: "beautifyShadowRadius")
+        ov.requestEditorChromeRelayout()
         ov.needsDisplay = true
     }
 
@@ -1270,13 +1256,6 @@ class ToolOptionsRowView: NSView {
         guard let ov = overlayView else { return }
         let swatchBtn = viewWithTag(995) as? NSButton ?? sender
         ov.showBeautifyGradientPopover(anchorView: swatchBtn)
-    }
-
-    @objc private func beautifyToggleChanged(_ sender: NSButton) {
-        guard let ov = overlayView else { return }
-        ov.beautifyEnabled = sender.state == .on
-        UserDefaults.standard.set(ov.beautifyEnabled, forKey: "beautifyEnabled")
-        ov.needsDisplay = true
     }
 
     private func addHintLabel(at x: CGFloat, text: String) -> CGFloat {

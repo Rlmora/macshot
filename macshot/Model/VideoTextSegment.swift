@@ -140,8 +140,8 @@ final class VideoTextSegment: Codable {
         let minSize: CGFloat = 0.04
         var x = max(0, min(1 - minSize, r.origin.x))
         var y = max(0, min(1 - minSize, r.origin.y))
-        var w = max(minSize, min(1 - x, r.size.width))
-        var h = max(minSize, min(1 - y, r.size.height))
+        let w = max(minSize, min(1 - x, r.size.width))
+        let h = max(minSize, min(1 - y, r.size.height))
         if x + w > 1 { x = 1 - w }
         if y + h > 1 { y = 1 - h }
         return CGRect(x: x, y: y, width: w, height: h)

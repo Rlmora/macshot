@@ -157,6 +157,10 @@ private final class CaptureTimingTrace: @unchecked Sendable {
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
+    private struct ClipboardImage {
+        let image: NSImage
+        let identity: String?
+    }
 
     private var statusItem: NSStatusItem!
     private var updaterController: SPUStandardUpdaterController!
@@ -192,6 +196,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private var statusBarMenu: NSMenu?
     private var captureSessionID: UInt = 0
     private var captureTimingTrace: CaptureTimingTrace?
+    private var backgroundRestoreObserver: NSObjectProtocol?
     /// App Nap suppression assertion. Held for the app's lifetime so global
     /// hotkeys respond instantly instead of paying a 1-2s wake-up penalty
     /// when macshot has been idle. `.userInitiatedAllowingIdleSystemSleep`
@@ -1061,18 +1066,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
 
         var remaining = seconds
         delayTimer?.invalidate()
-        delayTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+        delayTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self, weak countdownView] timer in
             remaining -= 1
             if remaining <= 0 {
                 timer.invalidate()
-                self?.delayTimer = nil
-                self?.delayCountdownWindow?.orderOut(nil)
-                self?.delayCountdownWindow = nil
-                self?.removeDelayEscMonitors()
-                self?.performCapture(fromMenu: false)
+                Task { @MainActor [weak self] in
+                    self?.delayTimer = nil
+                    self?.delayCountdownWindow?.orderOut(nil)
+                    self?.delayCountdownWindow = nil
+                    self?.removeDelayEscMonitors()
+                    self?.performCapture(fromMenu: false)
+                }
             } else {
-                countdownView.remaining = remaining
-                countdownView.needsDisplay = true
+                Task { @MainActor [weak countdownView] in
+                    countdownView?.remaining = remaining
+                    countdownView?.needsDisplay = true
+                }
             }
         }
     }
@@ -1104,7 +1113,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             NSScreen.screens
         }
         let mouseLocation = NSEvent.mouseLocation
-        let mouseScreen = screens.first { $0.frame.contains(mouseLocation) }
+        let mouseScreenIndex = screens.firstIndex { $0.frame.contains(mouseLocation) }
 
         // Kick off the screenshot capture on a background queue. Window
         // creation runs on main concurrently — both costs are paid in parallel.
@@ -1163,6 +1172,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             DispatchQueue.main.async {
                 guard let self = self, self.isCapturing,
                       self.captureSessionID == sessionID else { return }
+                let currentScreens = NSScreen.screens
+                let mouseScreen = mouseScreenIndex.flatMap { index in
+                    index < currentScreens.count ? currentScreens[index] : nil
+                }
                 self.installAndShowOverlays(
                     captures: captures,
                     controllers: controllers,
@@ -1235,10 +1248,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         var ticks = 0
         let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] t in
             ticks += 1
-            self?.captureTimingTrace?.mark("BEACON tick=\(ticks)")
             if ticks >= 60 {  // 3 seconds
                 t.invalidate()
-                self?.runloopBeaconTimer = nil
+            }
+            Task { @MainActor [weak self] in
+                self?.captureTimingTrace?.mark("BEACON tick=\(ticks)")
+                if ticks >= 60 {
+                    self?.runloopBeaconTimer = nil
+                }
             }
         }
         timer.tolerance = 0.005
@@ -1407,27 +1424,38 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     private func scheduleBackgroundWindowRestore() {
         guard !stashedBackgroundWindows.isEmpty else { return }
         let ws = NSWorkspace.shared.notificationCenter
-        var token: NSObjectProtocol?
-        token = ws.addObserver(
+        removeBackgroundRestoreObserver()
+        backgroundRestoreObserver = ws.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] note in
-            guard let self = self else { return }
-            if let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-               app.bundleIdentifier != Bundle.main.bundleIdentifier {
-                if let token = token { ws.removeObserver(token) }
-                self.restoreBackgroundWindowsNow()
+            let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let bundleID, bundleID != Bundle.main.bundleIdentifier {
+                    self.removeBackgroundRestoreObserver()
+                    self.restoreBackgroundWindowsNow()
+                }
             }
         }
         // Fallback — if no other app ever activates in the next 1s just
         // restore anyway. Otherwise the windows would stay invisible.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self = self else { return }
-            if !self.stashedBackgroundWindows.isEmpty {
-                if let token = token { ws.removeObserver(token) }
-                self.restoreBackgroundWindowsNow()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if !self.stashedBackgroundWindows.isEmpty {
+                    self.removeBackgroundRestoreObserver()
+                    self.restoreBackgroundWindowsNow()
+                }
             }
+        }
+    }
+
+    private func removeBackgroundRestoreObserver() {
+        if let token = backgroundRestoreObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            backgroundRestoreObserver = nil
         }
     }
 
@@ -1442,6 +1470,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             window.orderBack(nil)
         }
         stashedBackgroundWindows.removeAll()
+        removeBackgroundRestoreObserver()
     }
 
     private func finishCaptureTimingReport(_ finalLabel: String) -> String? {
@@ -1656,7 +1685,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     private func saveImageToFile(_ image: NSImage) {
-        guard let imageData = ImageEncoder.encode(image) else { return }
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [ImageEncoder.utType]
         savePanel.nameFieldStringValue = FilenameFormatter.defaultImageFilename()
@@ -1666,7 +1694,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
             savePanel.begin { response in
-                if response == .OK, let url = savePanel.url {
+                guard response == .OK, let url = savePanel.url else { return }
+                DispatchQueue.global(qos: .userInitiated).async {
+                    guard let imageData = ImageEncoder.encode(image) else { return }
                     try? imageData.write(to: url)
                 }
             }
@@ -1785,8 +1815,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
     }
 
     @objc private func openImageFromClipboard() {
-        guard let image = imageFromClipboard() else { showNoClipboardImageAlert(); return }
-        DetachedEditorWindowController.open(image: image)
+        guard let clipboardImage = imageFromClipboard() else { showNoClipboardImageAlert(); return }
+        DetachedEditorWindowController.open(image: clipboardImage.image)
     }
 
     @objc private func pinImageFromClipboard() {
@@ -1803,11 +1833,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         return true
     }
 
-    private func imageFromClipboard() -> NSImage? {
+    private func imageFromClipboard() -> ClipboardImage? {
         let pasteboard = NSPasteboard.general
-        if let image = NSImage(pasteboard: pasteboard), isUsableImage(image) {
-            return image
-        }
         let imageTypes: [NSPasteboard.PasteboardType] = [
             .png,
             .tiff,
@@ -1819,7 +1846,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             for type in imageTypes where item.availableType(from: [type]) != nil {
                 guard let data = item.data(forType: type) else { continue }
                 if let image = NSImage(data: data), isUsableImage(image) {
-                    return image
+                    return ClipboardImage(
+                        image: image,
+                        identity: ImageIdentity.dataIdentity(data, prefix: "clipboard-\(type.rawValue)"))
                 }
             }
         }
@@ -1838,8 +1867,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
             guard let url else { continue }
             guard isImageFileURL(url) else { continue }
             if let image = NSImage(contentsOf: url), isUsableImage(image) {
-                return image
+                return ClipboardImage(image: image, identity: ImageIdentity.fileIdentity(for: url))
             }
+        }
+        if let image = NSImage(pasteboard: pasteboard), isUsableImage(image) {
+            return ClipboardImage(image: image, identity: nil)
         }
         return nil
     }
@@ -1849,8 +1881,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         textPayload: ClipboardTextRenderer.Payload?,
         identity: String?
     )? {
-        if let image = imageFromClipboard() {
-            return (image, nil, nil)
+        if let clipboardImage = imageFromClipboard() {
+            return (clipboardImage.image, nil, clipboardImage.identity)
         }
         guard let rawText = NSPasteboard.general.string(forType: .string),
               let text = ClipboardTextRenderer.clippedNonEmptyText(from: rawText) else {
@@ -2370,20 +2402,29 @@ extension AppDelegate: OverlayWindowControllerDelegate {
 
         var remaining = seconds
         delayTimer?.invalidate()
-        delayTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+        let screenNumber = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue
+        delayTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self, weak countdownView] timer in
             remaining -= 1
             if remaining <= 0 {
                 timer.invalidate()
-                self?.delayTimer = nil
-                self?.delayCountdownWindow?.orderOut(nil)
-                self?.delayCountdownWindow = nil
-                self?.removeDelayEscMonitors()
-                self?.beginRecording(rect: rect, screen: screen,
-                                     fpsOverride: fpsOverride,
-                                     onStopOverride: onStopOverride)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    let targetScreen = NSScreen.screens.first { candidate in
+                        (candidate.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.intValue == screenNumber
+                    } ?? NSScreen.main ?? NSScreen.screens[0]
+                    self.delayTimer = nil
+                    self.delayCountdownWindow?.orderOut(nil)
+                    self.delayCountdownWindow = nil
+                    self.removeDelayEscMonitors()
+                    self.beginRecording(rect: rect, screen: targetScreen,
+                                        fpsOverride: fpsOverride,
+                                        onStopOverride: onStopOverride)
+                }
             } else {
-                countdownView.remaining = remaining
-                countdownView.needsDisplay = true
+                Task { @MainActor [weak countdownView] in
+                    countdownView?.remaining = remaining
+                    countdownView?.needsDisplay = true
+                }
             }
         }
     }
