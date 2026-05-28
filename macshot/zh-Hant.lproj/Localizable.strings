@@ -539,7 +539,13 @@
 "Right" = "靠右";
 "Text Color" = "文字顏色";
 "Background Color" = "背景顏色";
+"Window" = "視窗";
 "Rounded" = "圓角";
+"Terminal" = "終端";
+"Shell Only" = "僅外殼";
+"Shell Color" = "外殼顏色";
+"Pick Shell Color" = "吸取外殼顏色";
+"Set shell color %@" = "已設定外殼顏色 %@";
 "Custom…" = "自訂⋯";
 "Transparent" = "透明";
 "Black" = "黑色";

@@ -536,7 +536,13 @@
 "Right" = "Right";
 "Text Color" = "Text Color";
 "Background Color" = "Background Color";
+"Window" = "Window";
 "Rounded" = "Rounded";
+"Terminal" = "Terminal";
+"Shell Only" = "Shell Only";
+"Shell Color" = "Shell Color";
+"Pick Shell Color" = "Pick Shell Color";
+"Set shell color %@" = "Set shell color %@";
 "Custom…" = "Custom…";
 "Transparent" = "Transparent";
 "Black" = "Black";

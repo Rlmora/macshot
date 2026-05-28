@@ -396,6 +396,15 @@ class OverlayView: NSView {
         let v = UserDefaults.standard.object(forKey: "beautifyBgRadius") as? Double
         return v != nil ? CGFloat(v!) : 8
     }()
+    var beautifyTerminalShellOnly: Bool = UserDefaults.standard.bool(
+        forKey: "beautifyTerminalShellOnly")
+    var beautifyTerminalShellColor: NSColor = {
+        guard let data = UserDefaults.standard.data(forKey: "beautifyTerminalShellColor"),
+              let color = try? NSKeyedUnarchiver.unarchivedObject(
+                ofClass: NSColor.self, from: data)
+        else { return BeautifyRenderer.terminalBackgroundColor }
+        return color.withAlphaComponent(1)
+    }()
 
     var customBeautifyBackground: NSImage? {
         didSet { cachedBeautifyBgCGImage = nil }
@@ -434,7 +443,9 @@ class OverlayView: NSView {
             isWindowSnap: selectionIsWindowSnap,
             customBackgroundImage: beautifyStyleIndex == -1 ? customBeautifyBackground : nil,
             backgroundBlur: beautifyBackgroundBlur,
-            cachedBackgroundCGImage: beautifyStyleIndex == -1 ? cachedBeautifyBgCGImage : nil
+            cachedBackgroundCGImage: beautifyStyleIndex == -1 ? cachedBeautifyBgCGImage : nil,
+            terminalShellOnly: beautifyTerminalShellOnly,
+            terminalShellColor: beautifyTerminalShellColor
         )
     }
 
@@ -475,8 +486,9 @@ class OverlayView: NSView {
     var cachedEffectsScreenshot: NSImage?
 
     // Color picker target
-    enum ColorPickerTarget { case drawColor, textBg, textOutline, textGlyphStroke, annotationOutline }
+    enum ColorPickerTarget { case drawColor, textBg, textOutline, textGlyphStroke, annotationOutline, terminalShell }
     private var colorPickerTarget: ColorPickerTarget = .drawColor
+    private var activeColorSampleTarget: ColorPickerTarget?
 
     // Beautify toolbar animation
     private var beautifyToolbarAnimProgress: CGFloat = 1.0  // 0..1, 1 = fully settled
@@ -1012,8 +1024,8 @@ class OverlayView: NSView {
             invalidateCursorPreview(oldCanvas: oldPt, newCanvas: oldPt, radius: r)
         }
 
-        // Track cursor for color sampler tool (canvas space)
-        if state == .selected && currentTool == .colorSampler && !isRecording {
+        // Track cursor for color sampling (canvas space)
+        if state == .selected && (currentTool == .colorSampler || activeColorSampleTarget != nil) && !isRecording {
             let canvasPoint = viewToCanvas(point)
             if canvasPoint != colorSamplerPoint {
                 let oldPt = colorSamplerPoint
@@ -1596,7 +1608,7 @@ class OverlayView: NSView {
             {
                 drawLoupePreview(at: loupeCursorPoint)
             }
-            if currentTool == .colorSampler && colorSamplerPoint != .zero {
+            if (currentTool == .colorSampler || activeColorSampleTarget != nil) && colorSamplerPoint != .zero {
                 drawColorSamplerPreview(at: colorSamplerPoint)
             }
 
@@ -1678,7 +1690,7 @@ class OverlayView: NSView {
                 }
 
                 // Re-draw color sampler preview on top of beautify
-                if currentTool == .colorSampler && colorSamplerPoint != .zero {
+                if (currentTool == .colorSampler || activeColorSampleTarget != nil) && colorSamplerPoint != .zero {
                     context.saveGraphicsState()
                     applyCanvasTransform(to: context)
                     drawColorSamplerPreview(at: colorSamplerPoint)
@@ -1745,7 +1757,7 @@ class OverlayView: NSView {
                     drawLoupePreview(at: loupeCursorPoint)
                     context.restoreGraphicsState()
                 }
-                if currentTool == .colorSampler && colorSamplerPoint != .zero {
+                if (currentTool == .colorSampler || activeColorSampleTarget != nil) && colorSamplerPoint != .zero {
                     context.saveGraphicsState()
                     applyCanvasTransform(to: context)
                     drawColorSamplerPreview(at: colorSamplerPoint)
@@ -2296,6 +2308,10 @@ class OverlayView: NSView {
         // Shadow extends downward (negative Y in AppKit), so expand the origin down.
         let shadowBleed = shadowRadius + shadowOffset
         let expandedRect: NSRect
+        let terminalContentPad = BeautifyRenderer.terminalContentPadding
+        let terminalTitleBarH = BeautifyRenderer.terminalTitleBarHeight
+        let terminalShellOnly = config.mode == .terminal && !config.isWindowSnap && config.terminalShellOnly
+
         if config.mode == .window && !config.isWindowSnap {
             let titleBarH: CGFloat = 28
             expandedRect = NSRect(
@@ -2303,6 +2319,20 @@ class OverlayView: NSView {
                 y: selectionRect.minY - pad - shadowBleed,
                 width: selectionRect.width + pad * 2 + shadowBleed * 2,
                 height: selectionRect.height + titleBarH + pad * 2 + shadowBleed * 2
+            )
+        } else if terminalShellOnly {
+            expandedRect = NSRect(
+                x: selectionRect.minX - terminalContentPad,
+                y: selectionRect.minY - terminalContentPad,
+                width: selectionRect.width + terminalContentPad * 2,
+                height: selectionRect.height + terminalContentPad * 2 + terminalTitleBarH
+            )
+        } else if config.mode == .terminal && !config.isWindowSnap {
+            expandedRect = NSRect(
+                x: selectionRect.minX - terminalContentPad - pad - shadowBleed,
+                y: selectionRect.minY - terminalContentPad - pad - shadowBleed,
+                width: selectionRect.width + terminalContentPad * 2 + pad * 2 + shadowBleed * 2,
+                height: selectionRect.height + terminalContentPad * 2 + terminalTitleBarH + pad * 2 + shadowBleed * 2
             )
         } else {
             expandedRect = NSRect(
@@ -2329,8 +2359,18 @@ class OverlayView: NSView {
         }
 
         // Position the image/window centered within the expanded rect (not affected by shadow bleed)
-        let innerX = selectionRect.minX - pad
-        let innerY = selectionRect.minY - pad
+        let innerX: CGFloat
+        let innerY: CGFloat
+        if terminalShellOnly {
+            innerX = selectionRect.minX - terminalContentPad
+            innerY = selectionRect.minY - terminalContentPad
+        } else if config.mode == .terminal && !config.isWindowSnap {
+            innerX = selectionRect.minX - terminalContentPad - pad
+            innerY = selectionRect.minY - terminalContentPad - pad
+        } else {
+            innerX = selectionRect.minX - pad
+            innerY = selectionRect.minY - pad
+        }
 
         // Draw gradient background (inner rect without shadow bleed)
         let bgRect: NSRect
@@ -2339,18 +2379,27 @@ class OverlayView: NSView {
             bgRect = NSRect(
                 x: innerX, y: innerY, width: selectionRect.width + pad * 2,
                 height: selectionRect.height + titleBarH + pad * 2)
+        } else if terminalShellOnly {
+            bgRect = .zero
+        } else if config.mode == .terminal && !config.isWindowSnap {
+            bgRect = NSRect(
+                x: innerX, y: innerY,
+                width: selectionRect.width + terminalContentPad * 2 + pad * 2,
+                height: selectionRect.height + terminalContentPad * 2 + terminalTitleBarH + pad * 2)
         } else {
             bgRect = NSRect(
                 x: innerX, y: innerY, width: selectionRect.width + pad * 2,
                 height: selectionRect.height + pad * 2)
         }
-        context.cgContext.saveGState()
-        let bgPath = NSBezierPath(
-            roundedRect: bgRect, xRadius: config.bgRadius, yRadius: config.bgRadius)
-        bgPath.addClip()
-        BeautifyRenderer.drawGradientBackground(
-            in: bgRect, config: config, context: context.cgContext)
-        context.cgContext.restoreGState()
+        if !terminalShellOnly {
+            context.cgContext.saveGState()
+            let bgPath = NSBezierPath(
+                roundedRect: bgRect, xRadius: config.bgRadius, yRadius: config.bgRadius)
+            bgPath.addClip()
+            BeautifyRenderer.drawGradientBackground(
+                in: bgRect, config: config, context: context.cgContext)
+            context.cgContext.restoreGState()
+        }
 
         // Compute the image rect inside the expanded frame
         let imageRect: NSRect
@@ -2372,6 +2421,21 @@ class OverlayView: NSView {
                 width: windowW,
                 height: windowH - titleBarH
             )
+        } else if config.mode == .terminal && !config.isWindowSnap {
+            let windowW = selectionRect.width + terminalContentPad * 2
+            let windowH = selectionRect.height + terminalContentPad * 2 + terminalTitleBarH
+            windowRect = NSRect(
+                x: innerX + (terminalShellOnly ? 0 : pad),
+                y: innerY + (terminalShellOnly ? 0 : pad),
+                width: windowW,
+                height: windowH
+            )
+            imageRect = NSRect(
+                x: windowRect.minX + terminalContentPad,
+                y: windowRect.minY + terminalContentPad,
+                width: selectionRect.width,
+                height: selectionRect.height
+            )
         } else {
             imageRect = NSRect(
                 x: innerX + pad,
@@ -2383,7 +2447,7 @@ class OverlayView: NSView {
         }
 
         // Drop shadow (not for snapped windows — handled via transparency layer below)
-        if shadowRadius > 0 && !config.isWindowSnap {
+        if shadowRadius > 0 && !config.isWindowSnap && !terminalShellOnly {
             let shadowPath = NSBezierPath(
                 roundedRect: windowRect, xRadius: cornerRadius, yRadius: cornerRadius)
             BeautifyRenderer.drawShadowedPath(shadowPath, radius: shadowRadius)
@@ -2534,6 +2598,49 @@ class OverlayView: NSView {
             }
 
             context.cgContext.restoreGState()
+        } else if config.mode == .terminal {
+            context.cgContext.saveGState()
+            NSBezierPath(roundedRect: windowRect, xRadius: cornerRadius, yRadius: cornerRadius)
+                .addClip()
+
+            config.terminalShellColor.setFill()
+            NSBezierPath(rect: windowRect).fill()
+
+            let titleBarRect = NSRect(
+                x: windowRect.minX,
+                y: windowRect.maxY - terminalTitleBarH,
+                width: windowRect.width,
+                height: terminalTitleBarH)
+            BeautifyRenderer.drawTerminalTrafficLights(in: titleBarRect)
+
+            if let image = screenshotImage {
+                let drawImage = effectsActive ? effectsProcessedScreenshot(image) : image
+                drawImage.draw(
+                    in: imageRect, from: selectionRect, operation: .sourceOver, fraction: 1.0)
+            }
+
+            let dx = imageRect.minX - selectionRect.minX
+            let dy = imageRect.minY - selectionRect.minY
+            if dx != 0 || dy != 0 {
+                context.cgContext.translateBy(x: dx, y: dy)
+            }
+            for annotation in annotations {
+                annotation.draw(in: context)
+            }
+            currentAnnotation?.draw(in: context)
+            if dx != 0 || dy != 0 {
+                context.cgContext.translateBy(x: -dx, y: -dy)
+            }
+
+            context.cgContext.restoreGState()
+
+            BeautifyRenderer.terminalBorderColor.setStroke()
+            let border = NSBezierPath(
+                roundedRect: windowRect.insetBy(dx: 0.5, dy: 0.5),
+                xRadius: cornerRadius,
+                yRadius: cornerRadius)
+            border.lineWidth = 1
+            border.stroke()
         } else {
             // Rounded mode — just rounded corners on the image
             context.cgContext.saveGState()
@@ -4268,11 +4375,29 @@ class OverlayView: NSView {
         // Anchor rect: beautify-expanded when active, selection otherwise
         let config = beautifyConfig
         let bPad = config.padding
-        let titleBarH: CGFloat = config.mode == .window ? 28 : 0
+        let extraX: CGFloat
+        let extraBottom: CGFloat
+        let extraTop: CGFloat
+        if config.mode == .terminal && !config.isWindowSnap && config.terminalShellOnly {
+            let contentPad = BeautifyRenderer.terminalContentPadding
+            extraX = contentPad
+            extraBottom = contentPad
+            extraTop = contentPad + BeautifyRenderer.terminalTitleBarHeight
+        } else if config.mode == .terminal && !config.isWindowSnap {
+            let contentPad = BeautifyRenderer.terminalContentPadding
+            extraX = bPad + contentPad
+            extraBottom = bPad + contentPad
+            extraTop = bPad + contentPad + BeautifyRenderer.terminalTitleBarHeight
+        } else {
+            let titleBarH: CGFloat = config.mode == .window && !config.isWindowSnap ? 28 : 0
+            extraX = bPad
+            extraBottom = bPad
+            extraTop = bPad + titleBarH
+        }
         let expandedAnchor = NSRect(
-            x: selectionRect.minX - bPad, y: selectionRect.minY - bPad,
-            width: selectionRect.width + bPad * 2,
-            height: selectionRect.height + titleBarH + bPad * 2)
+            x: selectionRect.minX - extraX, y: selectionRect.minY - extraBottom,
+            width: selectionRect.width + extraX * 2,
+            height: selectionRect.height + extraBottom + extraTop)
         let anchorRect: NSRect
         if beautifyToolbarAnimProgress < 1.0 {
             let t = beautifyToolbarAnimProgress
@@ -4589,6 +4714,11 @@ class OverlayView: NSView {
         }
 
         // Note: toolbar strips and options row are routed by hitTest() — they never reach here
+
+        if activeColorSampleTarget != nil {
+            sampleActiveColorTarget(at: viewToCanvas(point))
+            return
+        }
 
         // Control-click = right-click for color sampler (supports BetterTouchTool and other tools
         // that simulate right-click via control-click instead of rightMouseDown)
@@ -5597,6 +5727,11 @@ class OverlayView: NSView {
         // Text Fill/Outline color picking handled by ToolOptionsRowView
 
         // Toolbar right-clicks handled by ToolbarButtonView.onRightClick → handleToolbarButtonRightClick
+
+        if activeColorSampleTarget != nil {
+            cancelActiveColorSample()
+            return
+        }
 
         // Before a completed selection exists, right-click means "cancel this
         // capture". This keeps the primary cancellation path available even
@@ -7477,7 +7612,9 @@ class OverlayView: NSView {
                 overlayDelegate?.overlayViewDidRequestStopScrollCapture()
                 return
             }
-            if let annotation = currentAnnotation, annotation.tool == .stamp {
+            if activeColorSampleTarget != nil {
+                cancelActiveColorSample()
+            } else if let annotation = currentAnnotation, annotation.tool == .stamp {
                 finishPendingStampPlacement()
                 currentAnnotation = nil
                 needsDisplay = true
@@ -8136,6 +8273,7 @@ class OverlayView: NSView {
 
 
     func showColorPickerPopover(target: ColorPickerTarget, anchorView: NSView? = nil, anchorRect: NSRect = .zero) {
+        cancelActiveColorSample()
         colorPickerTarget = target
         let picker = ColorPickerView()
         let initialColor: NSColor
@@ -8144,6 +8282,7 @@ class OverlayView: NSView {
         case .textBg: initialColor = textEditor.bgColor
         case .textOutline: initialColor = textEditor.outlineColor
         case .textGlyphStroke: initialColor = textEditor.glyphStrokeColor
+        case .terminalShell: initialColor = beautifyTerminalShellColor
         case .annotationOutline:
             if let data = UserDefaults.standard.data(forKey: "annotationOutlineColor"),
                let c = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
@@ -8152,7 +8291,7 @@ class OverlayView: NSView {
                 initialColor = .white
             }
         }
-        picker.setColor(initialColor, opacity: currentColorOpacity)
+        picker.setColor(initialColor, opacity: target == .terminalShell ? 1 : currentColorOpacity)
         picker.customColors = customColors
         picker.selectedColorSlot = selectedColorSlot
 
@@ -8166,6 +8305,10 @@ class OverlayView: NSView {
         }
         picker.onOpacityChanged = { [weak self] opacity in
             guard let self = self else { return }
+            if self.colorPickerTarget == .terminalShell {
+                self.needsDisplay = true
+                return
+            }
             self.currentColorOpacity = opacity
             OverlayView.lastUsedOpacity = opacity
             UserDefaults.standard.set(Double(opacity), forKey: "lastUsedColorOpacity")
@@ -8188,6 +8331,45 @@ class OverlayView: NSView {
         } else {
             PopoverHelper.showAtPoint(picker, size: size, at: NSPoint(x: bounds.midX, y: bounds.midY), in: self, preferredEdge: .minY)
         }
+    }
+
+    func beginColorSample(target: ColorPickerTarget) {
+        PopoverHelper.dismiss()
+        activeColorSampleTarget = target
+        colorSamplerPoint = .zero
+        colorSamplerBitmap = nil
+        window?.makeFirstResponder(self)
+        needsDisplay = true
+    }
+
+    private func cancelActiveColorSample() {
+        guard activeColorSampleTarget != nil else { return }
+        activeColorSampleTarget = nil
+        let oldPt = colorSamplerPoint
+        colorSamplerPoint = .zero
+        colorSamplerBitmap = nil
+        invalidateCursorPreview(oldCanvas: oldPt, newCanvas: oldPt, radius: 200)
+        needsDisplay = true
+    }
+
+    private func sampleActiveColorTarget(at canvasPoint: NSPoint) {
+        guard let target = activeColorSampleTarget,
+              let screenshot = screenshotImage,
+              let result = sampleColor(from: screenshot, at: canvasPoint)
+        else { return }
+
+        colorPickerTarget = target
+        applyPickedColor(result.color)
+        toolOptionsRowView?.updateSwatchColors()
+        activeColorSampleTarget = nil
+        colorSamplerPoint = .zero
+        colorSamplerBitmap = nil
+        if target == .terminalShell {
+            showOverlayError(String(format: L("Set shell color %@"), result.hex))
+        } else {
+            showOverlayError(String(format: L("Set color %@"), result.hex))
+        }
+        needsDisplay = true
     }
 
     private func applyPickedColor(_ color: NSColor) {
@@ -8222,6 +8404,14 @@ class OverlayView: NSView {
                 ann.outlineColor = color
             }
             cachedCompositedImage = nil
+        case .terminalShell:
+            let opaqueColor = color.withAlphaComponent(1)
+            beautifyTerminalShellColor = opaqueColor
+            if let data = try? NSKeyedArchiver.archivedData(
+                withRootObject: opaqueColor, requiringSecureCoding: false)
+            {
+                UserDefaults.standard.set(data, forKey: "beautifyTerminalShellColor")
+            }
         }
         needsDisplay = true
     }
@@ -8270,6 +8460,13 @@ class OverlayView: NSView {
             UserDefaults.standard.object(forKey: "beautifyShadowRadius") as? Double ?? 20)
         beautifyBgRadius = CGFloat(
             UserDefaults.standard.object(forKey: "beautifyBgRadius") as? Double ?? 8)
+        beautifyTerminalShellOnly = UserDefaults.standard.bool(forKey: "beautifyTerminalShellOnly")
+        if let data = UserDefaults.standard.data(forKey: "beautifyTerminalShellColor"),
+           let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: NSColor.self, from: data) {
+            beautifyTerminalShellColor = color.withAlphaComponent(1)
+        } else {
+            beautifyTerminalShellColor = BeautifyRenderer.terminalBackgroundColor
+        }
         currentLineStyle =
             LineStyle(rawValue: UserDefaults.standard.integer(forKey: "currentLineStyle")) ?? .solid
         currentArrowStyle =
@@ -8285,6 +8482,7 @@ class OverlayView: NSView {
         sizeInputField = nil
         isResizingAnnotation = false
         loupeCursorPoint = .zero
+        activeColorSampleTarget = nil
         colorSamplerPoint = .zero
         colorSamplerBitmap = nil
         overlayErrorTimer?.invalidate()

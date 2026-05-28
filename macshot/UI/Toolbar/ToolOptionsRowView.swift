@@ -80,6 +80,10 @@ class ToolOptionsRowView: NSView {
             let col = editingAnnotation?.outlineColor ?? Self.savedOutlineColor
             swatch.layer?.backgroundColor = col.cgColor
         }
+        // Terminal beautify shell swatch (tag 979)
+        if let swatch = viewWithTag(979) {
+            swatch.layer?.backgroundColor = ov.beautifyTerminalShellColor.cgColor
+        }
     }
 
     func clearEditingAnnotation() {
@@ -1127,13 +1131,21 @@ class ToolOptionsRowView: NSView {
 
         // Mode toggle: Window / Rounded — hidden for snapped windows (always uses native chrome)
         if !isSnap {
-            let modeSeg = NSSegmentedControl(labels: ["W", "R"], trackingMode: .selectOne,
+            let modeSeg = NSSegmentedControl(labels: ["W", "R", "T"], trackingMode: .selectOne,
                                              target: self, action: #selector(beautifyModeChanged(_:)))
-            modeSeg.selectedSegment = ov.beautifyMode == .window ? 0 : 1
-            modeSeg.frame = NSRect(x: curX, y: (rowHeight - 22) / 2, width: 56, height: 22)
+            switch ov.beautifyMode {
+            case .window:
+                modeSeg.selectedSegment = 0
+            case .rounded:
+                modeSeg.selectedSegment = 1
+            case .terminal:
+                modeSeg.selectedSegment = 2
+            }
+            modeSeg.frame = NSRect(x: curX, y: (rowHeight - 22) / 2, width: 78, height: 22)
             (modeSeg.cell as? NSSegmentedCell)?.segmentStyle = .roundRect
+            modeSeg.toolTip = "\(L("Window")) / \(L("Rounded")) / \(L("Terminal"))"
             addSubview(modeSeg)
-            curX += 56
+            curX += 78
 
             curX = addSeparator(at: curX)
         }
@@ -1148,6 +1160,11 @@ class ToolOptionsRowView: NSView {
 
         // Shadow slider
         curX = addBeautifySlider(at: curX, label: L("Shadow"), value: ov.beautifyShadowRadius, min: 0, max: 100, action: #selector(beautifyShadowChanged(_:)))
+
+        if !isSnap && ov.beautifyMode == .terminal {
+            curX = addTerminalShellColorSwatch(at: curX, ov: ov)
+            curX = addTerminalShellOnlyToggle(at: curX, ov: ov)
+        }
 
         // Blur slider — only shown for custom image backgrounds
         if ov.beautifyStyleIndex == -1 {
@@ -1185,6 +1202,61 @@ class ToolOptionsRowView: NSView {
         return curX
     }
 
+    private func addTerminalShellColorSwatch(at x: CGFloat, ov: OverlayView) -> CGFloat {
+        var curX = x
+        let swatchSize: CGFloat = 20
+        let swatch = NSButton(frame: NSRect(
+            x: curX,
+            y: (rowHeight - swatchSize) / 2,
+            width: swatchSize,
+            height: swatchSize))
+        swatch.title = ""
+        swatch.isBordered = false
+        swatch.wantsLayer = true
+        swatch.layer?.backgroundColor = ov.beautifyTerminalShellColor.cgColor
+        swatch.layer?.cornerRadius = 4
+        swatch.layer?.borderWidth = 1.5
+        swatch.layer?.borderColor = ToolbarLayout.iconColor.withAlphaComponent(0.4).cgColor
+        swatch.toolTip = L("Shell Color")
+        swatch.tag = 979
+        swatch.target = self
+        swatch.action = #selector(terminalShellColorClicked(_:))
+        addSubview(swatch)
+        curX += swatchSize + 2
+
+        let picker = NSButton(frame: NSRect(x: curX, y: (rowHeight - 20) / 2, width: 22, height: 20))
+        picker.bezelStyle = .recessed
+        picker.isBordered = false
+        picker.image = NSImage(systemSymbolName: "eyedropper", accessibilityDescription: L("Pick Shell Color"))?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        picker.imagePosition = .imageOnly
+        picker.toolTip = L("Pick Shell Color")
+        picker.target = self
+        picker.action = #selector(terminalShellColorSampleClicked(_:))
+        addSubview(picker)
+        picker.contentTintColor = ToolbarLayout.iconColor.withAlphaComponent(0.8)
+        curX += 26
+        return curX
+    }
+
+    private func addTerminalShellOnlyToggle(at x: CGFloat, ov: OverlayView) -> CGFloat {
+        var curX = x
+        let checkbox = NSButton(checkboxWithTitle: L("Shell Only"), target: self, action: #selector(terminalShellOnlyChanged(_:)))
+        checkbox.state = ov.beautifyTerminalShellOnly ? .on : .off
+        checkbox.font = NSFont.systemFont(ofSize: 9.5, weight: .medium)
+        checkbox.contentTintColor = ToolbarLayout.iconColor.withAlphaComponent(0.75)
+        checkbox.toolTip = L("Shell Only")
+        checkbox.sizeToFit()
+        checkbox.frame = NSRect(
+            x: curX,
+            y: (rowHeight - 20) / 2,
+            width: checkbox.frame.width,
+            height: 20)
+        addSubview(checkbox)
+        curX += checkbox.frame.width + 6
+        return curX
+    }
+
     private func addBeautifySlider(at x: CGFloat, label: String, value: CGFloat, min: CGFloat, max: CGFloat, action: Selector) -> CGFloat {
         var curX = x
         let lbl = NSTextField(labelWithString: label)
@@ -1209,9 +1281,17 @@ class ToolOptionsRowView: NSView {
 
     @objc private func beautifyModeChanged(_ sender: NSSegmentedControl) {
         guard let ov = overlayView else { return }
-        ov.beautifyMode = sender.selectedSegment == 0 ? .window : .rounded
+        switch sender.selectedSegment {
+        case 0:
+            ov.beautifyMode = .window
+        case 1:
+            ov.beautifyMode = .rounded
+        default:
+            ov.beautifyMode = .terminal
+        }
         UserDefaults.standard.set(ov.beautifyMode.rawValue, forKey: "beautifyMode")
         ov.requestEditorChromeRelayout()
+        rebuild(for: ov.currentTool)
         ov.needsDisplay = true
     }
 
@@ -1244,6 +1324,24 @@ class ToolOptionsRowView: NSView {
         UserDefaults.standard.set(sender.doubleValue, forKey: "beautifyBgBlur")
         ov.cachedCompositedImage = nil
         ov.needsDisplay = true
+    }
+
+    @objc private func terminalShellOnlyChanged(_ sender: NSButton) {
+        guard let ov = overlayView else { return }
+        ov.beautifyTerminalShellOnly = sender.state == .on
+        UserDefaults.standard.set(ov.beautifyTerminalShellOnly, forKey: "beautifyTerminalShellOnly")
+        ov.requestEditorChromeRelayout()
+        ov.needsDisplay = true
+    }
+
+    @objc private func terminalShellColorClicked(_ sender: NSButton) {
+        guard let ov = overlayView else { return }
+        ov.showColorPickerPopover(target: .terminalShell, anchorView: sender)
+    }
+
+    @objc private func terminalShellColorSampleClicked(_ sender: NSButton) {
+        guard let ov = overlayView else { return }
+        ov.beginColorSample(target: .terminalShell)
     }
 
     func updateBeautifySwatch(styleIndex: Int) {

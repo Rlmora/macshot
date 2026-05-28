@@ -539,7 +539,13 @@
 "Right" = "右对齐";
 "Text Color" = "文字颜色";
 "Background Color" = "背景颜色";
+"Window" = "窗口";
 "Rounded" = "圆角";
+"Terminal" = "终端";
+"Shell Only" = "仅外壳";
+"Shell Color" = "外壳颜色";
+"Pick Shell Color" = "吸取外壳颜色";
+"Set shell color %@" = "已设置外壳颜色 %@";
 "Custom…" = "自定义…";
 "Transparent" = "透明";
 "Black" = "黑色";

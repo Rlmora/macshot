@@ -17,14 +17,23 @@ private struct PinEditorBeautifyMargins {
 
     static func canvas(config: BeautifyConfig, enabled: Bool) -> PinEditorBeautifyMargins {
         guard enabled else { return .zero }
-        let shadowBleed = config.shadowRadius + BeautifyRenderer.shadowOffset(for: config.shadowRadius)
-        let base = config.padding + shadowBleed
-        let titleBar: CGFloat = (config.mode == .window && !config.isWindowSnap) ? 28 : 0
+        let terminalShellOnly = config.mode == .terminal && !config.isWindowSnap && config.terminalShellOnly
+        let shadowBleed = terminalShellOnly ? 0 : config.shadowRadius + BeautifyRenderer.shadowOffset(for: config.shadowRadius)
+        let base = terminalShellOnly ? 0 : config.padding + shadowBleed
+        let contentPadding: CGFloat
+        let titleBar: CGFloat
+        if config.mode == .terminal && !config.isWindowSnap {
+            contentPadding = BeautifyRenderer.terminalContentPadding
+            titleBar = BeautifyRenderer.terminalTitleBarHeight
+        } else {
+            contentPadding = 0
+            titleBar = (config.mode == .window && !config.isWindowSnap) ? 28 : 0
+        }
         return PinEditorBeautifyMargins(
-            left: base,
-            right: base,
-            bottom: base,
-            top: base + titleBar
+            left: base + contentPadding,
+            right: base + contentPadding,
+            bottom: base + contentPadding,
+            top: base + contentPadding + titleBar
         )
     }
 

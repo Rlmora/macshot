@@ -4,6 +4,7 @@ import SwiftUI
 enum BeautifyMode: Int {
     case window = 0   // macOS window chrome with traffic lights
     case rounded = 1  // just rounded corners, no title bar
+    case terminal = 2 // termshot-style dark terminal window
 }
 
 /// Mesh gradient definition for macOS 15+ (3×3 grid of control points with colors)
@@ -44,6 +45,8 @@ struct BeautifyConfig {
     var backgroundBlur: CGFloat = 0     // 0..50 blur radius for custom background
     /// Pre-rendered CGImage of custom background (with blur applied). Set via `prepareBackgroundCache()`.
     var cachedBackgroundCGImage: CGImage?
+    var terminalShellOnly: Bool = false
+    var terminalShellColor: NSColor = BeautifyRenderer.terminalBackgroundColor
 
     /// Whether a custom background image is active
     var isCustomBackground: Bool { customBackgroundImage != nil }
@@ -81,6 +84,14 @@ struct BeautifyConfig {
 }
 
 class BeautifyRenderer {
+
+    static let terminalTitleBarHeight: CGFloat = 40
+    static let terminalContentPadding: CGFloat = 24
+    static let terminalButtonRadius: CGFloat = 6
+    static let terminalButtonSpacing: CGFloat = 25
+    static let terminalButtonInset: CGFloat = 24
+    static let terminalBackgroundColor = NSColor(calibratedWhite: 0.082, alpha: 1.0)
+    static let terminalBorderColor = NSColor(calibratedWhite: 0.25, alpha: 1.0)
 
     private static func meshStyle(points: [SIMD2<Float>], colors: [NSColor], fallbackStops: [(NSColor, CGFloat)], fallbackAngle: CGFloat = 135) -> BeautifyStyle {
         BeautifyStyle(
@@ -487,6 +498,8 @@ class BeautifyRenderer {
             return renderWindow(image: image, config: config)
         case .rounded:
             return renderRounded(image: image, config: config)
+        case .terminal:
+            return renderTerminal(image: image, config: config)
         }
     }
 
@@ -539,6 +552,35 @@ class BeautifyRenderer {
         NSColor.white.setFill()
         path.fill()
         NSGraphicsContext.restoreGraphicsState()
+    }
+
+    static func drawTerminalTrafficLights(in titleBarRect: NSRect) {
+        let buttonY = titleBarRect.midY
+        let buttonStartX = titleBarRect.minX + terminalButtonInset + terminalButtonRadius
+        let trafficLights = [
+            NSColor(calibratedRed: 0.929, green: 0.396, blue: 0.353, alpha: 1.0),
+            NSColor(calibratedRed: 0.882, green: 0.753, blue: 0.298, alpha: 1.0),
+            NSColor(calibratedRed: 0.443, green: 0.741, blue: 0.278, alpha: 1.0),
+        ]
+
+        for (i, fill) in trafficLights.enumerated() {
+            let cx = buttonStartX + CGFloat(i) * terminalButtonSpacing
+            let circleRect = NSRect(
+                x: cx - terminalButtonRadius,
+                y: buttonY - terminalButtonRadius,
+                width: terminalButtonRadius * 2,
+                height: terminalButtonRadius * 2
+            )
+            fill.setFill()
+            NSBezierPath(ovalIn: circleRect).fill()
+        }
+    }
+
+    static func terminalWindowSize(for imageSize: NSSize) -> NSSize {
+        NSSize(
+            width: imageSize.width + terminalContentPadding * 2,
+            height: imageSize.height + terminalContentPadding * 2 + terminalTitleBarHeight
+        )
     }
 
     /// Pre-render the mesh gradient for a given size (call before entering NSImage drawing handlers
@@ -876,6 +918,94 @@ class BeautifyRenderer {
             NSBezierPath(roundedRect: imageRect, xRadius: cornerRadius, yRadius: cornerRadius).addClip()
             image.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 1.0)
             context.restoreGState()
+
+            success = true
+            return true
+        }
+        if !success {
+            _ = result.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        }
+        return success ? result : image
+    }
+
+    // MARK: - Terminal mode (termshot-style dark terminal window)
+
+    private static func renderTerminal(image: NSImage, config: BeautifyConfig) -> NSImage {
+        let imgSize = image.size
+        let padding = config.terminalShellOnly ? 0 : config.padding
+        let cornerRadius = config.cornerRadius
+        let shadowRadius = config.terminalShellOnly ? 0 : config.shadowRadius
+        let windowSize = terminalWindowSize(for: imgSize)
+
+        let totalWidth = windowSize.width + padding * 2
+        let totalHeight = windowSize.height + padding * 2
+
+        // Pre-render mesh gradient outside the drawing handler to avoid @MainActor isolation issues
+        let prerenderedMesh = config.terminalShellOnly
+            ? nil
+            : prerenderBackground(config: config, width: Int(totalWidth), height: Int(totalHeight))
+
+        var success = false
+        let result = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else {
+                return true
+            }
+
+            if !config.terminalShellOnly {
+                let bgRect = NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight)
+                context.saveGState()
+                drawGradientBackground(in: bgRect, config: config, context: context, prerenderedMesh: prerenderedMesh)
+                context.restoreGState()
+            }
+
+            let windowRect = NSRect(
+                x: padding,
+                y: padding,
+                width: windowSize.width,
+                height: windowSize.height
+            )
+
+            if shadowRadius > 0 {
+                let shadowPath = NSBezierPath(
+                    roundedRect: windowRect,
+                    xRadius: cornerRadius,
+                    yRadius: cornerRadius
+                )
+                drawShadowedPath(shadowPath, radius: shadowRadius)
+            }
+
+            context.saveGState()
+            NSBezierPath(roundedRect: windowRect, xRadius: cornerRadius, yRadius: cornerRadius).addClip()
+
+            config.terminalShellColor.setFill()
+            NSBezierPath(rect: windowRect).fill()
+
+            let titleBarRect = NSRect(
+                x: windowRect.minX,
+                y: windowRect.maxY - terminalTitleBarHeight,
+                width: windowRect.width,
+                height: terminalTitleBarHeight
+            )
+            drawTerminalTrafficLights(in: titleBarRect)
+
+            let contentRect = NSRect(
+                x: windowRect.minX + terminalContentPadding,
+                y: windowRect.minY + terminalContentPadding,
+                width: imgSize.width,
+                height: imgSize.height
+            )
+            image.draw(in: contentRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+
+            context.restoreGState()
+
+            terminalBorderColor.setStroke()
+            let border = NSBezierPath(
+                roundedRect: windowRect.insetBy(dx: 0.5, dy: 0.5),
+                xRadius: cornerRadius,
+                yRadius: cornerRadius
+            )
+            border.lineWidth = 1
+            border.stroke()
 
             success = true
             return true
