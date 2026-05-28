@@ -192,6 +192,7 @@
 "Launch at login" = "登入時啟動";
 "Show snap alignment guides" = "顯示對齊輔助線";
 "Capture mouse cursor in screenshot" = "在螢幕截圖中擷取滑鼠游標";
+"Allow cross-display region capture" = "允許跨顯示器區域截圖";
 "Double-click selection to copy" = "雙擊選取範圍以複製";
 "Use window title in saved filename" = "在儲存的檔案名稱中使用視窗標題";
 "Hide menu bar icon" = "隱藏選單列圖像";

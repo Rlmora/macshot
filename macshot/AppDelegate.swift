@@ -2917,6 +2917,13 @@ extension AppDelegate: OverlayWindowControllerDelegate {
     }
 
     func overlayDidChangeSelection(_ controller: OverlayWindowController, globalRect: NSRect) {
+        guard UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture") else {
+            for other in overlayControllers where other !== controller {
+                other.setRemoteSelection(.zero)
+            }
+            return
+        }
+
         for other in overlayControllers where other !== controller {
             let otherOrigin = other.screen.frame.origin
             let localRect = NSRect(x: globalRect.origin.x - otherOrigin.x,
@@ -2928,6 +2935,8 @@ extension AppDelegate: OverlayWindowControllerDelegate {
     }
 
     func overlayDidRemoteResizeSelection(_ controller: OverlayWindowController, globalRect: NSRect) {
+        guard UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture") else { return }
+
         // Update the primary screen's actual selection
         guard let primary = overlayControllers.first(where: { $0 !== controller && $0.selectionRect.width >= 1 }) else { return }
         let primaryOrigin = primary.screen.frame.origin
@@ -2948,6 +2957,8 @@ extension AppDelegate: OverlayWindowControllerDelegate {
     }
 
     func overlayDidFinishRemoteResize(_ controller: OverlayWindowController, globalRect: NSRect) {
+        guard UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture") else { return }
+
         // Final sync after remote resize — update primary, re-sync ALL secondaries, transfer focus
         guard let primary = overlayControllers.first(where: { $0 !== controller && $0.selectionRect.width >= 1 }) else { return }
         let primaryOrigin = primary.screen.frame.origin
@@ -2973,6 +2984,8 @@ extension AppDelegate: OverlayWindowControllerDelegate {
     }
 
     func overlayCrossScreenImage(_ controller: OverlayWindowController) -> NSImage? {
+        guard UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture") else { return nil }
+
         let others = overlayControllers.filter { $0 !== controller && $0.remoteSelectionRect.width >= 1 && $0.remoteSelectionRect.height >= 1 }
         guard !others.isEmpty else { return nil }
         return stitchCrossScreenCapture(primary: controller, others: others)

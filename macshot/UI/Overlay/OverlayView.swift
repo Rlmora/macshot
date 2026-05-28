@@ -163,6 +163,10 @@ class OverlayView: NSView {
     private var spaceRepositionLast: NSPoint = .zero  // last mouse position when space reposition started
     private var toolScrollAccumulator: CGFloat = 0
 
+    private var shouldClampSelectionToBounds: Bool {
+        !isEditorMode && !UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture")
+    }
+
     private var stampPlacementTimer: Timer?
     private var stampPlacementRotating: Bool = false
 
@@ -2184,6 +2188,7 @@ class OverlayView: NSView {
                 width: newW,
                 height: newH
             )
+            selectionRect = clampedSelectionRect(selectionRect)
         }
 
         field.removeFromSuperview()
@@ -4716,7 +4721,8 @@ class OverlayView: NSView {
         switch state {
         case .idle:
             // Check remote selection handles for cross-screen resize
-            if remoteSelectionRect.width >= 1 && remoteSelectionRect.height >= 1 {
+            if UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture")
+                && remoteSelectionRect.width >= 1 && remoteSelectionRect.height >= 1 {
                 let remoteHandle = hitTestRemoteHandle(at: point)
                 if remoteHandle != .none {
                     isResizingRemoteSelection = true
@@ -4727,8 +4733,9 @@ class OverlayView: NSView {
                 return
             }
             // Always start a drag — snap is resolved in mouseUp if no real drag occurred
-            selectionStart = point
-            selectionRect = NSRect(origin: point, size: .zero)
+            let startPoint = clampedSelectionPoint(point)
+            selectionStart = startPoint
+            selectionRect = NSRect(origin: startPoint, size: .zero)
             state = .selecting
             overlayDelegate?.overlayViewDidBeginSelection()
             needsDisplay = true
@@ -5187,7 +5194,8 @@ class OverlayView: NSView {
                 cachedCompositedImage = nil
                 needsDisplay = true
             } else if isDraggingSelection {
-                selectionRect.origin = NSPoint(x: point.x - dragOffset.x, y: point.y - dragOffset.y)
+                let origin = NSPoint(x: point.x - dragOffset.x, y: point.y - dragOffset.y)
+                selectionRect.origin = clampedSelectionOrigin(origin, size: selectionRect.size)
                 needsDisplay = true
             } else if isResizingSelection {
                 resizeSelection(to: point)
@@ -5408,13 +5416,14 @@ class OverlayView: NSView {
     private func finishSelection() {
         if selectionRect.width > 5 || selectionRect.height > 5 {
             // Real drag — use drawn rect as-is
+            selectionRect = clampedSelectionRect(selectionRect)
             enterSelectionMoveMode()
             state = .selected
             if !autoOCRMode && !autoQuickSaveMode && !autoScrollCaptureMode && !autoConfirmMode { showToolbars = true }
             overlayDelegate?.overlayViewDidFinishSelection(selectionRect)
         } else if windowSnapEnabled, let snapRect = hoveredWindowRect, !snapRect.isEmpty {
             // Click (no drag) with snap on — snap to hovered window
-            selectionRect = snapRect
+            selectionRect = clampedSelectionRect(snapRect)
             selectionIsWindowSnap = true
             snappedWindowID = hoveredWindowID
             // Capture the window independently for beautify (transparent corners)
@@ -5475,10 +5484,38 @@ class OverlayView: NSView {
         needsDisplay = true
     }
 
+    private func clampedSelectionPoint(_ point: NSPoint) -> NSPoint {
+        guard shouldClampSelectionToBounds else { return point }
+        return NSPoint(
+            x: max(bounds.minX, min(point.x, bounds.maxX)),
+            y: max(bounds.minY, min(point.y, bounds.maxY)))
+    }
+
+    private func clampedSelectionOrigin(_ origin: NSPoint, size: NSSize) -> NSPoint {
+        guard shouldClampSelectionToBounds else { return origin }
+        let maxX = bounds.maxX - size.width
+        let maxY = bounds.maxY - size.height
+        return NSPoint(
+            x: maxX < bounds.minX ? bounds.minX : max(bounds.minX, min(origin.x, maxX)),
+            y: maxY < bounds.minY ? bounds.minY : max(bounds.minY, min(origin.y, maxY)))
+    }
+
+    private func clampedSelectionRect(_ rect: NSRect) -> NSRect {
+        guard shouldClampSelectionToBounds else { return rect }
+        let clipped = rect.intersection(bounds)
+        if !clipped.isEmpty { return clipped }
+
+        let size = NSSize(
+            width: min(max(rect.width, 1), bounds.width),
+            height: min(max(rect.height, 1), bounds.height))
+        return NSRect(origin: clampedSelectionOrigin(rect.origin, size: size), size: size)
+    }
+
     /// Update `selectionRect` from the anchor at `selectionStart` to the
     /// current cursor point. Honors Shift (constrain to square) and Space
     /// (reposition anchor).
     private func updateSelectionRect(to point: NSPoint, shiftHeld: Bool) {
+        let point = clampedSelectionPoint(point)
         if spaceRepositioning {
             let dx = point.x - spaceRepositionLast.x
             let dy = point.y - spaceRepositionLast.y
@@ -5492,7 +5529,7 @@ class OverlayView: NSView {
         let h = max(1, shiftHeld ? min(rawW, rawH) : rawH)
         let x = selectionStart.x < point.x ? selectionStart.x : selectionStart.x - w
         let y = selectionStart.y < point.y ? selectionStart.y : selectionStart.y - h
-        selectionRect = NSRect(x: x, y: y, width: w, height: h)
+        selectionRect = clampedSelectionRect(NSRect(x: x, y: y, width: w, height: h))
         overlayDelegate?.overlayViewSelectionDidChange(selectionRect)
         needsDisplay = true
     }
@@ -5823,7 +5860,7 @@ class OverlayView: NSView {
             break
         }
 
-        selectionRect = newRect
+        selectionRect = clampedSelectionRect(newRect)
     }
 
     // MARK: - Toolbar Actions
@@ -6326,7 +6363,8 @@ class OverlayView: NSView {
             while true {
                 guard let event = win.nextEvent(matching: [.leftMouseDragged, .leftMouseUp]) else { break }
                 let point = convert(event.locationInWindow, from: nil)
-                selectionRect.origin = NSPoint(x: point.x - offset.x, y: point.y - offset.y)
+                let origin = NSPoint(x: point.x - offset.x, y: point.y - offset.y)
+                selectionRect.origin = clampedSelectionOrigin(origin, size: selectionRect.size)
                 if hasWebcam { repositionWebcamSetupPreview() }
                 needsDisplay = true
                 displayIfNeeded()
@@ -8035,8 +8073,12 @@ class OverlayView: NSView {
     }
 
     func applySelection(_ rect: NSRect) {
-        selectionRect = rect
-        selectionStart = rect.origin
+        selectionRect = clampedSelectionRect(rect)
+        guard selectionRect.width > 0, selectionRect.height > 0 else {
+            clearSelection()
+            return
+        }
+        selectionStart = selectionRect.origin
         enterSelectionMoveMode()
         state = .selected
         showToolbars = true
