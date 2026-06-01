@@ -1073,7 +1073,7 @@ class ToolOptionsRowView: NSView {
     private func addRedactOptions(at x: CGFloat, ov: OverlayView) -> CGFloat {
         var curX = x
 
-        // — Draw mode: All / Text Only segmented control —
+        // — Draw mode: All / Text / Similar segmented control —
         let drawLabel = NSTextField(labelWithString: L("Draw:"))
         drawLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .medium)
         drawLabel.textColor = ToolbarLayout.iconColor.withAlphaComponent(0.4)
@@ -1082,10 +1082,10 @@ class ToolOptionsRowView: NSView {
         addSubview(drawLabel)
         curX += drawLabel.frame.width + 4
 
-        let textOnly = UserDefaults.standard.bool(forKey: "censorTextOnly")
-        let drawSeg = NSSegmentedControl(labels: [L("All"), L("Text Only")], trackingMode: .selectOne,
+        let drawMode = CensorDrawMode.current
+        let drawSeg = NSSegmentedControl(labels: [L("All"), L("Text"), L("Similar")], trackingMode: .selectOne,
                                           target: self, action: #selector(drawModeChanged(_:)))
-        drawSeg.selectedSegment = textOnly ? 1 : 0
+        drawSeg.selectedSegment = drawMode.rawValue
         drawSeg.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         (drawSeg.cell as? NSSegmentedCell)?.segmentStyle = .roundRect
         drawSeg.sizeToFit()
@@ -1520,7 +1520,8 @@ class ToolOptionsRowView: NSView {
     }
 
     @objc private func drawModeChanged(_ sender: NSSegmentedControl) {
-        UserDefaults.standard.set(sender.selectedSegment == 1, forKey: "censorTextOnly")
+        let mode = CensorDrawMode(rawValue: sender.selectedSegment) ?? .all
+        CensorDrawMode.save(mode)
     }
 
     @objc private func pencilSmoothModeChanged(_ sender: NSSegmentedControl) {

@@ -49,20 +49,30 @@ extension OverlayView {
             return
         }
         let types = AutoRedactor.redactTypeNames
+        let allTypeKeys = types.map { $0.key }
+        let enabledTypes = AutoRedactor.enabledRedactTypeKeys()
         let picker = ListPickerView()
         picker.items = types.map { item in
             .init(
                 title: item.label,
-                isSelected: UserDefaults.standard.object(forKey: item.key) as? Bool ?? true)
+                isSelected: enabledTypes.contains(item.key))
         }
         picker.onSelect = { [weak self] idx in
             let key = types[idx].key
-            let current = UserDefaults.standard.object(forKey: key) as? Bool ?? true
-            UserDefaults.standard.set(!current, forKey: key)
+            var enabled = Set(
+                UserDefaults.standard.array(forKey: "enabledRedactTypes") as? [String]
+                ?? Array(AutoRedactor.enabledRedactTypeKeys())
+            )
+            if enabled.contains(key) {
+                enabled.remove(key)
+            } else {
+                enabled.insert(key)
+            }
+            UserDefaults.standard.set(allTypeKeys.filter { enabled.contains($0) }, forKey: "enabledRedactTypes")
             picker.items = types.map { item in
                 .init(
                     title: item.label,
-                    isSelected: UserDefaults.standard.object(forKey: item.key) as? Bool ?? true)
+                    isSelected: enabled.contains(item.key))
             }
             self?.needsDisplay = true
         }

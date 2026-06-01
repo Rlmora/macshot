@@ -155,6 +155,8 @@
 "Gradient Style" = "Gradient Style";
 "On" = "On";
 "Text Only" = "Text Only";
+"Similar" = "Similar";
+"No similar areas found" = "No similar areas found";
 "All Text" = "All Text";
 "PII" = "PII";
 "Faces" = "Faces";

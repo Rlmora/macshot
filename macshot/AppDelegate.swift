@@ -213,9 +213,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, SPUUpdaterDelegate {
         ToolShortcutManager.prepareCaches()
 
         // Prevent multiple instances — if already running, activate the existing one and quit
+        let isRunningTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
         let bundleID = Bundle.main.bundleIdentifier ?? "com.sw33tlie.macshot.macshot"
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
-        if running.count > 1 {
+        if !isRunningTests, running.count > 1 {
             // Tell the existing instance to show its icon and open Settings
             DistributedNotificationCenter.default().postNotificationName(
                 .init("com.sw33tlie.macshot.showAndOpenPrefs"),

@@ -21,6 +21,16 @@ enum AutoRedactor {
         ("bearer", "Bearer Tokens"),
     ]
 
+    static func enabledRedactTypeKeys() -> Set<String> {
+        if let saved = UserDefaults.standard.array(forKey: "enabledRedactTypes") as? [String] {
+            return Set(saved)
+        }
+        return Set(redactTypeNames.compactMap { item in
+            let legacyValue = UserDefaults.standard.object(forKey: item.key) as? Bool
+            return legacyValue ?? true ? item.key : nil
+        })
+    }
+
     private static let sensitivePatterns: [(name: String, pattern: NSRegularExpression)] = {
         let patterns: [(String, String)] = [
             ("email", #"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"#),
@@ -264,8 +274,8 @@ enum AutoRedactor {
         }
 
         // Pass 1: regex matching
-        let enabledTypes = UserDefaults.standard.array(forKey: "enabledRedactTypes") as? [String]
-        let activePatterns = sensitivePatterns.filter { enabledTypes == nil || enabledTypes!.contains($0.name) }
+        let enabledTypes = enabledRedactTypeKeys()
+        let activePatterns = sensitivePatterns.filter { enabledTypes.contains($0.name) }
 
         for (i, obs) in observations.enumerated() {
             guard let candidate = obs.topCandidates(1).first else { continue }

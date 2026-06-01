@@ -50,7 +50,9 @@ final class PixelateToolHandler: AnnotationToolHandler {
             return
         }
 
-        if UserDefaults.standard.bool(forKey: "censorTextOnly") {
+        let drawMode = CensorDrawMode.current
+
+        if drawMode == .textOnly {
             let drawnRect = annotation.boundingRect
             let sourceImg = annotation.sourceImage
             let sourceImgBounds = annotation.sourceImageBounds
@@ -67,7 +69,47 @@ final class PixelateToolHandler: AnnotationToolHandler {
                 canvas.annotations.append(contentsOf: anns)
                 canvas.undoStack.append(contentsOf: anns.map { .added($0) })
                 canvas.redoStack.removeAll()
+                canvas.invalidateCompositedImage()
                 canvas.setNeedsDisplay()
+            }
+        } else if drawMode == .similar {
+            let sampleRect = annotation.boundingRect
+            let sourceImg = annotation.sourceImage
+            let sourceImgBounds = annotation.sourceImageBounds
+            let selectionRect = canvas.selectionRect
+            let captureDrawRect = canvas.captureDrawRect
+            let color = canvas.currentColor
+            canvas.activeAnnotation = nil
+            canvas.setNeedsDisplay()
+            guard let screenshot = canvas.screenshotImage else { return }
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                TextSimilarityRedactor.findMatches(
+                    in: screenshot,
+                    sampleRect: sampleRect,
+                    selectionRect: selectionRect,
+                    captureDrawRect: captureDrawRect
+                ) { matches in
+                    let anns = TextSimilarityRedactor.buildRedactions(
+                    matches: matches,
+                    redactTool: .pixelate,
+                    color: color,
+                    sourceImage: sourceImg,
+                    sourceImageBounds: sourceImgBounds
+                )
+                    DispatchQueue.main.async { [weak canvas] in
+                        guard let canvas = canvas else { return }
+                        guard !anns.isEmpty else {
+                            canvas.showMessage(L("No similar areas found"))
+                            return
+                        }
+                        canvas.annotations.append(contentsOf: anns)
+                        canvas.undoStack.append(contentsOf: anns.map { .added($0) })
+                        canvas.redoStack.removeAll()
+                        canvas.invalidateCompositedImage()
+                        canvas.setNeedsDisplay()
+                    }
+                }
             }
         } else {
             commitAnnotation(annotation, canvas: canvas)

@@ -136,6 +136,8 @@
 "Gradient Style" = "渐变样式";
 "On" = "开";
 "Text Only" = "仅文字";
+"Similar" = "相似";
+"No similar areas found" = "未找到相似区域";
 "All Text" = "全部文字";
 "PII" = "PII";
 "Faces" = "面部";

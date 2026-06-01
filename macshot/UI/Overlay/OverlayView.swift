@@ -8590,6 +8590,14 @@ extension OverlayView: AnnotationCanvas {
     func setNeedsDisplay() {
         needsDisplay = true
     }
+
+    func invalidateCompositedImage() {
+        cachedCompositedImage = nil
+    }
+
+    func showMessage(_ message: String) {
+        showOverlayError(message)
+    }
 }
 
 // MARK: - TextEditingCanvas conformance

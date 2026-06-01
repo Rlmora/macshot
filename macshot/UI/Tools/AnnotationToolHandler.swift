@@ -51,9 +51,12 @@ protocol AnnotationCanvas: AnyObject {
 
     /// Composited image of screenshot + committed annotations (for pixelate/blur source).
     func compositedImage() -> NSImage?
+    /// Clear any cached screenshot + annotation composite after batch annotation edits.
+    func invalidateCompositedImage()
 
     // Display
     func setNeedsDisplay()
+    func showMessage(_ message: String)
 
     // Snap guides (for tools that use alignment snapping)
     var snapGuideX: CGFloat? { get set }
