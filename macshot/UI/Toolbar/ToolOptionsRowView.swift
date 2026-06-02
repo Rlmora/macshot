@@ -1122,6 +1122,9 @@ class ToolOptionsRowView: NSView {
         curX = addRedactButton(at: curX, title: L("People"), action: #selector(redactPeopleClicked),
                                font: btnFont, height: btnH, y: btnY)
 
+        curX = addRedactButton(at: curX, title: L("Terminal"), action: #selector(redactTerminalClicked),
+                               font: btnFont, height: btnH, y: btnY)
+
         return curX
     }
 
@@ -1544,6 +1547,10 @@ class ToolOptionsRowView: NSView {
 
     @objc private func redactPeopleClicked() {
         overlayView?.performRedactPeople()
+    }
+
+    @objc private func redactTerminalClicked() {
+        overlayView?.performRedactTerminalSensitive()
     }
 
     @objc private func redactTypesClicked(_ sender: NSView) {

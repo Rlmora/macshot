@@ -572,6 +572,28 @@ extension OverlayView {
         }
     }
 
+    func performRedactTerminalSensitive() {
+        guard state == .selected, let screenshot = screenshotImage else { return }
+        let tool: AnnotationTool = currentTool == .pixelate ? .pixelate : .rectangle
+        let sourceImg = tool == .pixelate ? screenshotImage : nil
+        TerminalSensitiveRedactor.redactTerminalSensitiveText(
+            screenshot: screenshot, selectionRect: selectionRect, captureDrawRect: captureDrawRect,
+            redactTool: tool, color: currentColor, sourceImage: sourceImg,
+            sourceImageBounds: captureDrawRect
+        ) { [weak self] anns in
+            guard let self = self else { return }
+            guard !anns.isEmpty else {
+                self.showMessage(L("No terminal sensitive data found"))
+                return
+            }
+            self.annotations.append(contentsOf: anns)
+            self.undoStack.append(contentsOf: anns.map { .added($0) })
+            self.redoStack.removeAll()
+            self.cachedCompositedImage = nil
+            self.needsDisplay = true
+        }
+    }
+
     func showEffectsPopover(anchorView: NSView? = nil, anchorRect: NSRect = .zero) {
         if PopoverHelper.isVisible {
             PopoverHelper.dismiss()

@@ -14,6 +14,103 @@ private class SettingsWindow: NSWindow {
     }
 }
 
+private final class TerminalCustomRuleRowView: NSView, NSTextFieldDelegate {
+    private let ruleID: UUID
+    private let enabledCheckbox: NSButton
+    private let nameField: NSTextField
+    private let patternField: NSTextField
+    private let exampleField: NSTextField
+
+    var onSelect: (() -> Void)?
+
+    var isSelected = false {
+        didSet { updateBackground() }
+    }
+
+    var rule: TerminalSensitiveCustomRule {
+        TerminalSensitiveCustomRule(
+            id: ruleID,
+            name: nameField.stringValue,
+            pattern: patternField.stringValue,
+            example: exampleField.stringValue,
+            enabled: enabledCheckbox.state == .on
+        )
+    }
+
+    init(rule: TerminalSensitiveCustomRule) {
+        self.ruleID = rule.id
+        self.enabledCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+        self.nameField = NSTextField(string: rule.name)
+        self.patternField = NSTextField(string: rule.pattern)
+        self.exampleField = NSTextField(string: rule.example)
+        super.init(frame: .zero)
+        setup(rule: rule)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func mouseDown(with event: NSEvent) {
+        onSelect?()
+        super.mouseDown(with: event)
+    }
+
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        onSelect?()
+    }
+
+    private func setup(rule: TerminalSensitiveCustomRule) {
+        wantsLayer = true
+        enabledCheckbox.state = rule.enabled ? .on : .off
+        enabledCheckbox.target = self
+        enabledCheckbox.action = #selector(selectRow(_:))
+        enabledCheckbox.translatesAutoresizingMaskIntoConstraints = false
+
+        for field in [nameField, patternField, exampleField] {
+            field.delegate = self
+            field.font = NSFont.systemFont(ofSize: 12)
+            field.translatesAutoresizingMaskIntoConstraints = false
+        }
+        patternField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        nameField.placeholderString = L("Name")
+        patternField.placeholderString = #"tenant=[a-z0-9-]+"#
+        exampleField.placeholderString = "tenant=acme-prod"
+
+        addSubview(enabledCheckbox)
+        addSubview(nameField)
+        addSubview(patternField)
+        addSubview(exampleField)
+
+        NSLayoutConstraint.activate([
+            enabledCheckbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            enabledCheckbox.widthAnchor.constraint(equalToConstant: 68),
+            enabledCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            nameField.leadingAnchor.constraint(equalTo: enabledCheckbox.trailingAnchor, constant: 8),
+            nameField.widthAnchor.constraint(equalToConstant: 140),
+            nameField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            patternField.leadingAnchor.constraint(equalTo: nameField.trailingAnchor, constant: 8),
+            patternField.widthAnchor.constraint(equalToConstant: 250),
+            patternField.centerYAnchor.constraint(equalTo: centerYAnchor),
+
+            exampleField.leadingAnchor.constraint(equalTo: patternField.trailingAnchor, constant: 8),
+            exampleField.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            exampleField.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+        updateBackground()
+    }
+
+    @objc private func selectRow(_ sender: NSButton) {
+        onSelect?()
+    }
+
+    private func updateBackground() {
+        layer?.backgroundColor = isSelected
+            ? NSColor.selectedContentBackgroundColor.withAlphaComponent(0.18).cgColor
+            : NSColor.clear.cgColor
+    }
+}
+
 class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowDelegate {
 
     // MARK: - Toolbar tab definitions
@@ -115,6 +212,14 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var scrollMaxHeightStepper: NSStepper!
     private var scrollFrozenDetectionCheckbox: NSButton!
     private var languagePopup: NSPopUpButton!
+    private var terminalSensitiveStatusLabel: NSTextField!
+    private var terminalRuleCheckboxes: [TerminalSensitiveRuleID: NSButton] = [:]
+    private var terminalCustomRulesDraft: [TerminalSensitiveCustomRule] = []
+    private var terminalCustomRuleRows: [TerminalCustomRuleRowView] = []
+    private var terminalCustomRuleRowsStack: NSStackView?
+    private var terminalCustomRuleErrorLabel: NSTextField?
+    private weak var terminalCustomRulesSheet: NSWindow?
+    private var selectedTerminalCustomRuleIndex: Int?
 
     var onHotkeyChanged: (() -> Void)?
 
@@ -1191,6 +1296,39 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         toolsGrid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
+        // ── Terminal Sensitive Redaction ─────────────────────
+        stack.addArrangedSubview(sectionHeader(L("Terminal Redaction")))
+        stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
+
+        let terminalNote = NSTextField(wrappingLabelWithString: L("Choose which terminal patterns are detected. Custom rules are managed separately."))
+        terminalNote.font = NSFont.systemFont(ofSize: 11)
+        terminalNote.textColor = .secondaryLabelColor
+        terminalNote.preferredMaxLayoutWidth = 520
+        stack.addArrangedSubview(terminalNote)
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        let terminalRuleGrid = makeTerminalRuleGrid()
+        stack.addArrangedSubview(terminalRuleGrid)
+        terminalRuleGrid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40).isActive = true
+        stack.setCustomSpacing(8, after: stack.arrangedSubviews.last!)
+
+        let manageRulesButton = NSButton(title: L("Manage Custom Rules..."), target: self, action: #selector(showTerminalCustomRulesSheet(_:)))
+        manageRulesButton.bezelStyle = .rounded
+
+        terminalSensitiveStatusLabel = NSTextField(labelWithString: "")
+        terminalSensitiveStatusLabel.font = NSFont.systemFont(ofSize: 10)
+        terminalSensitiveStatusLabel.textColor = .secondaryLabelColor
+        terminalSensitiveStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let terminalCustomRow = NSStackView(views: [manageRulesButton, terminalSensitiveStatusLabel])
+        terminalCustomRow.orientation = .horizontal
+        terminalCustomRow.alignment = .centerY
+        terminalCustomRow.spacing = 10
+        terminalCustomRow.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(terminalCustomRow)
+        updateTerminalSensitiveStatus()
+        stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
+
         // ── Bottom Toolbar Actions ───────────────────────────
         stack.addArrangedSubview(sectionHeader(L("Bottom Toolbar Actions")))
         stack.setCustomSpacing(4, after: stack.arrangedSubviews.last!)
@@ -2074,9 +2212,75 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         return box
     }
 
+    private func makeTerminalRuleGrid() -> NSView {
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.5).cgColor
+        box.layer?.cornerRadius = 6
+        box.layer?.borderWidth = 1
+        box.layer?.borderColor = NSColor.separatorColor.cgColor
+
+        let grid = NSStackView()
+        grid.orientation = .vertical
+        grid.alignment = .leading
+        grid.spacing = 8
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(grid)
+
+        let pad: CGFloat = 10
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: box.topAnchor, constant: pad),
+            grid.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: pad),
+            grid.trailingAnchor.constraint(equalTo: box.trailingAnchor, constant: -pad),
+            grid.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -pad),
+        ])
+
+        let enabledRuleIDs = TerminalSensitiveRedactor.enabledBuiltinRuleIDs()
+        let columns = 2
+        let rules = TerminalSensitiveRedactor.allBuiltinRuleIDs
+        for rowIndex in 0..<Int(ceil(Double(rules.count) / Double(columns))) {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.distribution = .fillEqually
+            row.spacing = 0
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
+
+            for column in 0..<columns {
+                let index = rowIndex * columns + column
+                guard index < rules.count else {
+                    row.addArrangedSubview(NSView())
+                    continue
+                }
+                let rule = rules[index]
+                let checkbox = NSButton(checkboxWithTitle: rule.title, target: self, action: #selector(terminalBuiltinRuleChanged(_:)))
+                checkbox.identifier = NSUserInterfaceItemIdentifier(rule.rawValue)
+                checkbox.state = enabledRuleIDs.contains(rule) ? .on : .off
+                checkbox.toolTip = "\(rule.title): \(rule.example)"
+                checkbox.translatesAutoresizingMaskIntoConstraints = false
+                checkbox.cell?.wraps = true
+                checkbox.cell?.isScrollable = false
+                checkbox.cell?.lineBreakMode = .byWordWrapping
+                if let cell = checkbox.cell as? NSButtonCell {
+                    cell.usesSingleLineMode = false
+                }
+                row.addArrangedSubview(checkbox)
+                terminalRuleCheckboxes[rule] = checkbox
+            }
+
+            grid.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true
+        }
+
+        return box
+    }
+
     // MARK: - Load settings
 
     private func loadSettings() {
+        reloadTerminalSensitiveSettingsUI()
+
         // Load shortcut fields
         for slot in HotkeyManager.HotkeySlot.allCases {
             hotkeyFields[slot]?.stringValue = HotkeyManager.displayString(for: slot)
@@ -2407,6 +2611,320 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         if sender.state == .on { if !enabled.contains(sender.tag) { enabled.append(sender.tag) } }
         else { enabled.removeAll { $0 == sender.tag } }
         UserDefaults.standard.set(enabled, forKey: key)
+    }
+
+    @objc private func terminalBuiltinRuleChanged(_ sender: NSButton) {
+        guard let rawValue = sender.identifier?.rawValue,
+              let ruleID = TerminalSensitiveRuleID(rawValue: rawValue)
+        else { return }
+        var enabledRuleIDs = TerminalSensitiveRedactor.enabledBuiltinRuleIDs()
+        if sender.state == .on {
+            enabledRuleIDs.insert(ruleID)
+        } else {
+            enabledRuleIDs.remove(ruleID)
+        }
+        TerminalSensitiveRedactor.saveEnabledBuiltinRuleIDs(enabledRuleIDs)
+        updateTerminalSensitiveStatus()
+    }
+
+    private func reloadTerminalSensitiveSettingsUI() {
+        let enabledRuleIDs = TerminalSensitiveRedactor.enabledBuiltinRuleIDs()
+        for (ruleID, checkbox) in terminalRuleCheckboxes {
+            checkbox.state = enabledRuleIDs.contains(ruleID) ? .on : .off
+        }
+        updateTerminalSensitiveStatus()
+    }
+
+    private func updateTerminalSensitiveStatus() {
+        guard let label = terminalSensitiveStatusLabel else { return }
+        let enabledBuiltIns = TerminalSensitiveRedactor.enabledBuiltinRuleIDs().count
+        let allBuiltIns = TerminalSensitiveRedactor.allBuiltinRuleIDs.count
+        let customRules = TerminalSensitiveRedactor.customRules()
+        let enabledCustomRules = customRules.filter(\.enabled).count
+        label.stringValue = String(
+            format: L("Built-in: %d/%d active · Custom: %d/%d active"),
+            enabledBuiltIns,
+            allBuiltIns,
+            enabledCustomRules,
+            customRules.count
+        )
+        label.textColor = .secondaryLabelColor
+    }
+
+    @objc private func showTerminalCustomRulesSheet(_ sender: NSButton) {
+        terminalCustomRulesDraft = TerminalSensitiveRedactor.customRules()
+        selectedTerminalCustomRuleIndex = terminalCustomRulesDraft.isEmpty ? nil : 0
+
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 440),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        sheet.title = L("Custom Rules")
+        sheet.isReleasedWhenClosed = false
+        terminalCustomRulesSheet = sheet
+
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: L("Custom Rules"))
+        title.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let hint = NSTextField(wrappingLabelWithString: L("Each enabled rule runs after built-in terminal rules. Order is for editing only; overlapping matches still prefer the most specific text."))
+        hint.font = NSFont.systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.preferredMaxLayoutWidth = 720
+        hint.translatesAutoresizingMaskIntoConstraints = false
+
+        let header = makeTerminalCustomRuleHeader()
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        terminalCustomRuleRowsStack = NSStackView()
+        terminalCustomRuleRowsStack?.orientation = .vertical
+        terminalCustomRuleRowsStack?.alignment = .leading
+        terminalCustomRuleRowsStack?.spacing = 0
+        terminalCustomRuleRowsStack?.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = terminalCustomRuleRowsStack
+
+        terminalCustomRuleErrorLabel = NSTextField(labelWithString: "")
+        terminalCustomRuleErrorLabel?.font = NSFont.systemFont(ofSize: 11)
+        terminalCustomRuleErrorLabel?.textColor = .systemRed
+        terminalCustomRuleErrorLabel?.translatesAutoresizingMaskIntoConstraints = false
+
+        let addButton = NSButton(title: L("Add"), target: self, action: #selector(addTerminalCustomRule(_:)))
+        let deleteButton = NSButton(title: L("Delete"), target: self, action: #selector(deleteTerminalCustomRule(_:)))
+        let moveUpButton = NSButton(title: L("Move Up"), target: self, action: #selector(moveTerminalCustomRuleUp(_:)))
+        let moveDownButton = NSButton(title: L("Move Down"), target: self, action: #selector(moveTerminalCustomRuleDown(_:)))
+        for button in [addButton, deleteButton, moveUpButton, moveDownButton] {
+            button.bezelStyle = .rounded
+        }
+        let editButtons = NSStackView(views: [addButton, deleteButton, moveUpButton, moveDownButton])
+        editButtons.orientation = .horizontal
+        editButtons.spacing = 8
+        editButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        let cancelButton = NSButton(title: L("Cancel"), target: self, action: #selector(cancelTerminalCustomRulesSheet(_:)))
+        cancelButton.bezelStyle = .rounded
+        let saveButton = NSButton(title: L("Save"), target: self, action: #selector(saveTerminalCustomRulesSheet(_:)))
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+        let bottomButtons = NSStackView(views: [cancelButton, saveButton])
+        bottomButtons.orientation = .horizontal
+        bottomButtons.spacing = 8
+        bottomButtons.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(title)
+        container.addSubview(hint)
+        container.addSubview(header)
+        container.addSubview(scrollView)
+        if let errorLabel = terminalCustomRuleErrorLabel {
+            container.addSubview(errorLabel)
+        }
+        container.addSubview(editButtons)
+        container.addSubview(bottomButtons)
+        sheet.contentView = container
+
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
+            title.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
+
+            hint.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 4),
+            hint.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            hint.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+
+            header.topAnchor.constraint(equalTo: hint.bottomAnchor, constant: 14),
+            header.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            header.heightAnchor.constraint(equalToConstant: 22),
+
+            scrollView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            scrollView.heightAnchor.constraint(equalToConstant: 220),
+
+            editButtons.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
+            editButtons.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+
+            terminalCustomRuleErrorLabel!.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            terminalCustomRuleErrorLabel!.trailingAnchor.constraint(lessThanOrEqualTo: bottomButtons.leadingAnchor, constant: -12),
+            terminalCustomRuleErrorLabel!.centerYAnchor.constraint(equalTo: bottomButtons.centerYAnchor),
+
+            bottomButtons.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
+            bottomButtons.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
+            bottomButtons.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18),
+        ])
+
+        rebuildTerminalCustomRuleRows()
+        window?.beginSheet(sheet)
+    }
+
+    private func makeTerminalCustomRuleHeader() -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let enabled = terminalCustomRuleHeaderLabel(L("Enabled"))
+        let name = terminalCustomRuleHeaderLabel(L("Name"))
+        let regex = terminalCustomRuleHeaderLabel(L("Regex"))
+        let example = terminalCustomRuleHeaderLabel(L("Example"))
+        for view in [enabled, name, regex, example] {
+            row.addSubview(view)
+        }
+
+        NSLayoutConstraint.activate([
+            enabled.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 10),
+            enabled.widthAnchor.constraint(equalToConstant: 68),
+            enabled.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+            name.leadingAnchor.constraint(equalTo: enabled.trailingAnchor, constant: 8),
+            name.widthAnchor.constraint(equalToConstant: 140),
+            name.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+            regex.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 8),
+            regex.widthAnchor.constraint(equalToConstant: 250),
+            regex.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+            example.leadingAnchor.constraint(equalTo: regex.trailingAnchor, constant: 8),
+            example.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -10),
+            example.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+
+        return row
+    }
+
+    private func terminalCustomRuleHeaderLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        return label
+    }
+
+    private func rebuildTerminalCustomRuleRows() {
+        guard let rowsStack = terminalCustomRuleRowsStack else { return }
+        rowsStack.arrangedSubviews.forEach {
+            rowsStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+        terminalCustomRuleRows = []
+
+        if terminalCustomRulesDraft.isEmpty {
+            let empty = NSTextField(labelWithString: L("No custom rules."))
+            empty.font = NSFont.systemFont(ofSize: 12)
+            empty.textColor = .secondaryLabelColor
+            empty.alignment = .center
+            empty.translatesAutoresizingMaskIntoConstraints = false
+            rowsStack.addArrangedSubview(empty)
+            empty.widthAnchor.constraint(equalToConstant: 724).isActive = true
+            empty.heightAnchor.constraint(equalToConstant: 72).isActive = true
+            return
+        }
+
+        for (index, rule) in terminalCustomRulesDraft.enumerated() {
+            let row = TerminalCustomRuleRowView(rule: rule)
+            row.isSelected = index == selectedTerminalCustomRuleIndex
+            row.onSelect = { [weak self] in
+                guard let self else { return }
+                self.selectedTerminalCustomRuleIndex = index
+                for (rowIndex, rowView) in self.terminalCustomRuleRows.enumerated() {
+                    rowView.isSelected = rowIndex == index
+                }
+                self.terminalCustomRuleErrorLabel?.stringValue = ""
+            }
+            rowsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalToConstant: 724).isActive = true
+            row.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            terminalCustomRuleRows.append(row)
+        }
+    }
+
+    private func syncTerminalCustomRuleRowsToDraft() {
+        guard !terminalCustomRuleRows.isEmpty else { return }
+        terminalCustomRulesDraft = terminalCustomRuleRows.map { $0.rule }
+    }
+
+    @objc private func addTerminalCustomRule(_ sender: NSButton) {
+        syncTerminalCustomRuleRowsToDraft()
+        terminalCustomRulesDraft.append(TerminalSensitiveCustomRule(
+            name: L("New Rule"),
+            pattern: "",
+            example: "",
+            enabled: false
+        ))
+        selectedTerminalCustomRuleIndex = terminalCustomRulesDraft.count - 1
+        terminalCustomRuleErrorLabel?.stringValue = ""
+        rebuildTerminalCustomRuleRows()
+    }
+
+    @objc private func deleteTerminalCustomRule(_ sender: NSButton) {
+        syncTerminalCustomRuleRowsToDraft()
+        guard let index = selectedTerminalCustomRuleIndex,
+              terminalCustomRulesDraft.indices.contains(index)
+        else { return }
+        terminalCustomRulesDraft.remove(at: index)
+        selectedTerminalCustomRuleIndex = terminalCustomRulesDraft.isEmpty
+            ? nil
+            : min(index, terminalCustomRulesDraft.count - 1)
+        terminalCustomRuleErrorLabel?.stringValue = ""
+        rebuildTerminalCustomRuleRows()
+    }
+
+    @objc private func moveTerminalCustomRuleUp(_ sender: NSButton) {
+        syncTerminalCustomRuleRowsToDraft()
+        guard let index = selectedTerminalCustomRuleIndex, index > 0 else { return }
+        terminalCustomRulesDraft.swapAt(index, index - 1)
+        selectedTerminalCustomRuleIndex = index - 1
+        terminalCustomRuleErrorLabel?.stringValue = ""
+        rebuildTerminalCustomRuleRows()
+    }
+
+    @objc private func moveTerminalCustomRuleDown(_ sender: NSButton) {
+        syncTerminalCustomRuleRowsToDraft()
+        guard let index = selectedTerminalCustomRuleIndex,
+              index < terminalCustomRulesDraft.count - 1
+        else { return }
+        terminalCustomRulesDraft.swapAt(index, index + 1)
+        selectedTerminalCustomRuleIndex = index + 1
+        terminalCustomRuleErrorLabel?.stringValue = ""
+        rebuildTerminalCustomRuleRows()
+    }
+
+    @objc private func cancelTerminalCustomRulesSheet(_ sender: NSButton) {
+        guard let sheet = terminalCustomRulesSheet else { return }
+        window?.endSheet(sheet)
+        sheet.close()
+    }
+
+    @objc private func saveTerminalCustomRulesSheet(_ sender: NSButton) {
+        syncTerminalCustomRuleRowsToDraft()
+        let rules = terminalCustomRulesDraft.map {
+            TerminalSensitiveCustomRule(
+                id: $0.id,
+                name: $0.name.trimmingCharacters(in: .whitespacesAndNewlines),
+                pattern: $0.pattern.trimmingCharacters(in: .whitespacesAndNewlines),
+                example: $0.example.trimmingCharacters(in: .whitespacesAndNewlines),
+                enabled: $0.enabled
+            )
+        }
+        if let error = TerminalSensitiveRedactor.firstInvalidCustomRule(in: rules) {
+            terminalCustomRuleErrorLabel?.stringValue = error
+            return
+        }
+
+        TerminalSensitiveRedactor.saveCustomRules(rules)
+        UserDefaults.standard.removeObject(forKey: TerminalSensitiveRedactor.customRegexDefaultsKey)
+        updateTerminalSensitiveStatus()
+
+        guard let sheet = terminalCustomRulesSheet else { return }
+        window?.endSheet(sheet)
+        sheet.close()
     }
     @objc private func accentColorChanged(_ sender: NSColorWell) {
         ToolbarLayout.saveAccentColor(sender.color)
