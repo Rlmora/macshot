@@ -231,6 +231,7 @@
 "Capture mouse cursor in screenshot" = "在螢幕截圖中擷取滑鼠游標";
 "Allow cross-display region capture" = "允許跨顯示器區域截圖";
 "Double-click selection to copy" = "雙擊選取範圍以複製";
+"Right-click selection to show color palette" = "右鍵選取範圍顯示顏色盤";
 "Use window title in saved filename" = "在儲存的檔案名稱中使用視窗標題";
 "Hide menu bar icon" = "隱藏選單列圖像";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "快捷鍵仍可使用。若要再次顯示圖像，請重新啟動 macshot。";

@@ -5721,6 +5721,34 @@ class OverlayView: NSView {
         needsDisplay = true
     }
 
+    @discardableResult
+    private func cancelRightClickTarget() -> Bool {
+        if colorWheel.isVisible && colorWheel.isSticky {
+            colorWheel.dismiss()
+            needsDisplay = true
+            return true
+        }
+        if textEditView != nil {
+            cancelTextEditing()
+            return true
+        }
+        if PopoverHelper.isVisible {
+            PopoverHelper.dismiss()
+            return true
+        }
+        if !selectedAnnotations.isEmpty {
+            selectedAnnotations = []
+            needsDisplay = true
+            return true
+        }
+        if state == .selected, currentTool != .select, currentAnnotation == nil {
+            enterSelectionMoveMode()
+            needsDisplay = true
+            return true
+        }
+        return false
+    }
+
     override func rightMouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
@@ -5738,11 +5766,6 @@ class OverlayView: NSView {
         // before the user has committed a region.
         if state == .idle || state == .selecting {
             overlayDelegate?.overlayViewDidCancel()
-            return
-        }
-
-        if state == .selected && !pointIsInSelection(point) && shouldAllowNewSelection() {
-            clearCurrentSelectionState()
             return
         }
 
@@ -5786,14 +5809,22 @@ class OverlayView: NSView {
             return
         }
 
-        if state == .selected && pointIsInSelection(point) {
-            // Show radial color wheel
-            colorWheel.show(at: point)
-
-            colorWheel.hoveredIndex = -1
-            needsDisplay = true
+        if cancelRightClickTarget() {
             return
         }
+
+        if state == .selected && pointIsInSelection(point) {
+            if UserDefaults.standard.bool(forKey: "rightClickColorPaletteEnabled") {
+                colorWheel.show(at: point)
+                colorWheel.hoveredIndex = -1
+                needsDisplay = true
+            } else {
+                overlayDelegate?.overlayViewDidCancel()
+            }
+            return
+        }
+
+        overlayDelegate?.overlayViewDidCancel()
     }
 
     override func rightMouseDragged(with event: NSEvent) {

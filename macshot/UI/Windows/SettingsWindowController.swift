@@ -161,6 +161,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     private var captureCursorCheckbox: NSButton!
     private var allowCrossDisplayRegionCaptureCheckbox: NSButton!
     private var doubleClickToCopyCheckbox: NSButton!
+    private var rightClickColorPaletteCheckbox: NSButton!
     private var filenameTemplateField: NSTextField!
     private var filenameTemplatePreview: NSTextField!
     private var recordingFilenameTemplateField: NSTextField!
@@ -636,6 +637,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         captureCursorCheckbox = NSButton(checkboxWithTitle: L("Capture mouse cursor in screenshot"), target: self, action: #selector(captureCursorChanged(_:)))
         allowCrossDisplayRegionCaptureCheckbox = NSButton(checkboxWithTitle: L("Allow cross-display region capture"), target: self, action: #selector(allowCrossDisplayRegionCaptureChanged(_:)))
         doubleClickToCopyCheckbox = NSButton(checkboxWithTitle: L("Double-click selection to copy"), target: self, action: #selector(doubleClickToCopyChanged(_:)))
+        rightClickColorPaletteCheckbox = NSButton(checkboxWithTitle: L("Right-click selection to show color palette"), target: self, action: #selector(rightClickColorPaletteChanged(_:)))
         filenameTemplateField = NSTextField()
         filenameTemplateField.placeholderString = FilenameFormatter.defaultTemplate
         filenameTemplateField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -712,6 +714,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
 
         stack.addArrangedSubview(indented(doubleClickToCopyCheckbox))
+        stack.setCustomSpacing(6, after: stack.arrangedSubviews.last!)
+
+        stack.addArrangedSubview(indented(rightClickColorPaletteCheckbox))
         stack.setCustomSpacing(20, after: stack.arrangedSubviews.last!)
 
         // ── Output ───────────────────────────────────────────
@@ -2334,6 +2339,7 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
         captureCursorCheckbox.state = UserDefaults.standard.bool(forKey: "captureCursor") ? .on : .off
         allowCrossDisplayRegionCaptureCheckbox.state = UserDefaults.standard.bool(forKey: "allowCrossDisplayRegionCapture") ? .on : .off
         doubleClickToCopyCheckbox.state = (UserDefaults.standard.object(forKey: "doubleClickToCopy") as? Bool ?? true) ? .on : .off
+        rightClickColorPaletteCheckbox.state = UserDefaults.standard.bool(forKey: "rightClickColorPaletteEnabled") ? .on : .off
         filenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
         updateFilenamePreview()
         recordingFilenameTemplateField.stringValue = UserDefaults.standard.string(forKey: FilenameFormatter.recordingUserDefaultsKey) ?? FilenameFormatter.defaultRecordingTemplate
@@ -3055,6 +3061,9 @@ class SettingsWindowController: NSWindowController, NSToolbarDelegate, NSWindowD
     }
     @objc private func doubleClickToCopyChanged(_ sender: NSButton) {
         UserDefaults.standard.set(sender.state == .on, forKey: "doubleClickToCopy")
+    }
+    @objc private func rightClickColorPaletteChanged(_ sender: NSButton) {
+        UserDefaults.standard.set(sender.state == .on, forKey: "rightClickColorPaletteEnabled")
     }
     @objc private func filenameTemplateCommitted(_ sender: NSTextField) {
         let trimmed = sender.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
