@@ -144,11 +144,23 @@ class OverlayWindowController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = false
-        window.ignoresMouseEvents = false
+        // Idle/warmed panels are click-through by invariant. Mouse events are
+        // enabled only when a real capture is presented (showOverlay/makeKey).
+        // This guarantees that a stranded warm panel, e.g. if warmPanel()'s
+        // deferred orderOut is delayed across a sleep/wake or display
+        // reconfigure, can never swallow clicks (see issue #231).
+        window.ignoresMouseEvents = true
         window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.hidesOnDeactivate = false
         window.isReleasedWhenClosed = false
+        // No automatic appearance animation when the overlay is ordered front.
+        // With the default behavior, AppKit auto-animates window appearance,
+        // and under the system "Reduce Motion" setting that becomes a brief
+        // scale/zoom-in, visible at the screenshot edges (issue #205). The
+        // overlay must appear instantly so its screenshot lines up 1:1 with
+        // the real screen.
+        window.animationBehavior = .none
 
         let view = OverlayView()
         view.frame = NSRect(origin: .zero, size: screen.frame.size)
@@ -191,6 +203,9 @@ class OverlayWindowController {
     func showOverlay() {
         guard let window = overlayWindow else { return }
         timingMark?("showOverlay begin appActive=\(NSApp.isActive)")
+        // A real capture is being presented — enable mouse interaction.
+        // (Idle/warmed panels are click-through; see setupWindow.)
+        window.ignoresMouseEvents = false
         rootView?.layoutSubtreeIfNeeded()
         timingMark?("after layoutSubtreeIfNeeded")
         overlayView?.displayIfNeeded()
@@ -216,6 +231,7 @@ class OverlayWindowController {
     }
 
     func makeKey() {
+        overlayWindow?.ignoresMouseEvents = false
         overlayWindow?.makeKeyAndOrderFront(nil)
         if let view = overlayView {
             overlayWindow?.makeFirstResponder(view)
@@ -233,14 +249,20 @@ class OverlayWindowController {
         // Use a barely-visible alpha so WindowServer doesn't optimize the
         // window away as a transparent no-op. Restore after we order out.
         let savedAlpha = panel.alphaValue
+        // Keep the warm panel click-through. Even if the deferred orderOut
+        // below is stranded (e.g. across a sleep/wake or display reconfigure),
+        // an invisible click-through window can't lock out input (issue #231).
+        panel.ignoresMouseEvents = true
         panel.alphaValue = 0.001
         panel.orderFrontRegardless()
         rootView?.layoutSubtreeIfNeeded()
         overlayView?.displayIfNeeded()
         CATransaction.flush()
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak panel] in
+            guard let panel else { return }
             panel.orderOut(nil)
             panel.alphaValue = savedAlpha
+            panel.ignoresMouseEvents = true
         }
     }
 
@@ -369,6 +391,8 @@ class OverlayWindowController {
         // with the same defaults as a fresh install.
         overlayWindow?.isOpaque = false
         overlayWindow?.backgroundColor = .clear
+        // Return to the idle click-through invariant before ordering out.
+        overlayWindow?.ignoresMouseEvents = true
         overlayWindow?.orderOut(nil)
         NSCursor.arrow.set()
         // Note: overlayDelegate is intentionally NOT cleared here; the
@@ -385,6 +409,7 @@ class OverlayWindowController {
         overlayWindow?.contentView = nil
         rootView = nil
         overlayView = nil
+        overlayWindow?.ignoresMouseEvents = true
         overlayWindow?.orderOut(nil)
         overlayWindow?.close()
         overlayWindow = nil
@@ -964,17 +989,65 @@ extension OverlayWindowController: OverlayViewDelegate {
     }
 
     private func saveImageToDirectory(_ image: NSImage) {
-        let dirURL = SaveDirectoryAccess.resolve()
-
+        // Resolve the filename now (at request time) so a delayed write or
+        // folder-prompt can't pick up a later title/timestamp.
         let template = UserDefaults.standard.string(forKey: FilenameFormatter.userDefaultsKey) ?? FilenameFormatter.defaultTemplate
         let base = FilenameFormatter.format(template: template, windowTitle: capturedWindowTitle)
         let filename = "\(base).\(ImageEncoder.fileExtension)"
-        let fileURL = dirURL.appendingPathComponent(filename)
+        if let dirURL = SaveDirectoryAccess.resolveIfAccessible() {
+            Self.writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: true)
+            return
+        }
+        // No authorized save folder (sandbox has no valid bookmark). A raw write
+        // would fail silently, so prompt the user to choose a folder once, then
+        // persist it as a bookmark for this and all future saves (issue #177).
+        requestSaveDirectoryAccess { dirURL, securityScoped in
+            Self.writeImage(image, toDirectory: dirURL, filename: filename, securityScoped: securityScoped)
+        }
+    }
 
+    /// Encode and write `image` into `dirURL` on a background queue, releasing
+    /// the security scope afterward. `defer` guarantees the scope is released
+    /// even if encoding fails.
+    private static func writeImage(_ image: NSImage, toDirectory dirURL: URL,
+                                   filename: String, securityScoped: Bool) {
         DispatchQueue.global(qos: .userInitiated).async {
+            defer { if securityScoped { SaveDirectoryAccess.stopAccessing(url: dirURL) } }
+            let fileURL = dirURL.appendingPathComponent(filename)
             guard let imageData = ImageEncoder.encode(image) else { return }
-            try? imageData.write(to: fileURL)
-            SaveDirectoryAccess.stopAccessing(url: dirURL)
+            do {
+                try imageData.write(to: fileURL)
+            } catch {
+                #if DEBUG
+                NSLog("macshot: failed to save screenshot to \(fileURL.path): \(error.localizedDescription)")
+                #endif
+            }
+        }
+    }
+
+    /// Prompt (on the main thread) for a save folder, persist it as a
+    /// security-scoped bookmark, then hand a scoped URL to `completion`.
+    /// `completion` runs only if the user picks a folder.
+    private func requestSaveDirectoryAccess(completion: @escaping (URL, Bool) -> Void) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = L("Choose a folder")
+        panel.directoryURL = SaveDirectoryAccess.directoryHint()
+        // App-modal (not a sheet): the overlay window is already dismissed by
+        // the time a quick-save reaches here, so there is no window to attach to.
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            SaveDirectoryAccess.save(url: url)
+            // Reopen through the freshly saved bookmark so first-save behavior
+            // matches every later save in sandbox mode.
+            if let scopedURL = SaveDirectoryAccess.resolveIfAccessible() {
+                completion(scopedURL, true)
+                return
+            }
+            let securityScoped = url.startAccessingSecurityScopedResource()
+            completion(url, securityScoped)
         }
     }
 
@@ -1004,6 +1077,8 @@ extension OverlayWindowController: OverlayViewDelegate {
                     }
                 }
             } else {
+                // Save cancelled - return to the active capture, mouse-interactive.
+                self.overlayWindow?.ignoresMouseEvents = false
                 self.overlayWindow?.makeKeyAndOrderFront(nil)
                 if let view = self.overlayView {
                     self.overlayWindow?.makeFirstResponder(view)

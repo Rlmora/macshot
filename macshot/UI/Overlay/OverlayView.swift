@@ -264,6 +264,19 @@ class OverlayView: NSView {
     var numberStartAt: Int = {
         UserDefaults.standard.object(forKey: "numberStartAt") as? Int ?? 1
     }()
+    /// Next number value, derived from the annotations currently on the canvas
+    /// (issue #211): one past the highest existing number, or `numberStartAt`
+    /// when no number annotations exist. Deriving from canvas state means the
+    /// sequence resets correctly after any delete, multi-delete, or undo:
+    /// no separate counter to keep in sync.
+    var nextNumberValue: Int {
+        let maxExisting = annotations
+            .filter { $0.tool == .number }
+            .compactMap { $0.number }
+            .max()
+        if let maxExisting { return maxExisting + 1 }
+        return numberStartAt
+    }
     var currentNumberFormat: NumberFormat = {
         NumberFormat(rawValue: UserDefaults.standard.integer(forKey: "numberFormat")) ?? .decimal
     }()
@@ -1257,7 +1270,39 @@ class OverlayView: NSView {
                 return row.hitTest(convert(point, to: row.superview))
             }
         }
-        return super.hitTest(point)
+        let result = super.hitTest(point)
+        if shouldIgnoreInactiveChromeHit(result) {
+            return self
+        }
+        return result
+    }
+
+    /// AppKit's default hitTest can still resolve a mouse-down to a hidden or
+    /// inactive toolbar/options subview (the chrome views are pooled and reused
+    /// across capture sessions, not destroyed). When that happens the event
+    /// never reaches OverlayView.mouseDown, so a new selection drag started over
+    /// the *previous* position of now-hidden chrome silently fails. Redirect
+    /// those hits back to self. Visible chrome is unaffected. (PR #219)
+    private func shouldIgnoreInactiveChromeHit(_ view: NSView?) -> Bool {
+        guard !isEditorMode, let view, view !== self else { return false }
+
+        var current: NSView? = view
+        var hasHiddenAncestor = false
+        while let candidate = current, candidate !== self {
+            hasHiddenAncestor = hasHiddenAncestor || candidate.isHidden
+            if isOverlayChromeRoot(candidate) {
+                return !showToolbars || hasHiddenAncestor
+            }
+            current = candidate.superview
+        }
+        return false
+    }
+
+    private func isOverlayChromeRoot(_ view: NSView) -> Bool {
+        if let bottomStripView, view === bottomStripView { return true }
+        if let rightStripView, view === rightStripView { return true }
+        if let toolOptionsRowView, view === toolOptionsRowView { return true }
+        return false
     }
 
     /// Returns true if the point is over any chrome element (toolbars, options row, popovers, labels).
@@ -1454,13 +1499,16 @@ class OverlayView: NSView {
         // Window snap highlight (drawn before helper text so text appears on top)
         drawWindowSnapHighlight()
 
-        // Helper text
-        if state == .idle {
-            if screenshotImage != nil {
-                drawIdleHelperText()
+        // Helper text (capture instructions). Suppressed when the user has
+        // enabled "Hide capture instructions" in Settings (issue #226).
+        if !UserDefaults.standard.bool(forKey: "hideCaptureInstructions") {
+            if state == .idle {
+                if screenshotImage != nil {
+                    drawIdleHelperText()
+                }
+            } else if state == .selecting {
+                drawSelectingHelperText()
             }
-        } else if state == .selecting {
-            drawSelectingHelperText()
         }
 
         // Draw remote selection region (cross-screen drag from another overlay)

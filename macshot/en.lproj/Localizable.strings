@@ -250,6 +250,7 @@
 "Allow cross-display region capture" = "Allow cross-display region capture";
 "Double-click selection to copy" = "Double-click selection to copy";
 "Right-click selection to show color palette" = "Right-click selection to show color palette";
+"Hide capture instructions" = "Hide capture instructions";
 "Use window title in saved filename" = "Use window title in saved filename";
 "Hide menu bar icon" = "Hide menu bar icon";
 "Hotkeys still work. To show the icon again, re-launch macshot." = "Hotkeys still work. To show the icon again, re-launch macshot.";
